@@ -1,0 +1,26 @@
+{
+  "name": "llm",
+  "version": "1.0.0",
+  "description": "Experiments with creating an LLM from scratch",
+  "main": "index.js",
+  "scripts": {
+    "test": "tsc && node --test dist/test/Tokenizer.test.js",
+    "build": "tsc",
+    "count-chars": "tsc && node dist/src/countCharacters.js",
+    "tokenize": "tsc && node dist/src/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/davidgamez-ai/llm.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/davidgamez-ai/llm/issues"
+  },
+  "homepage": "https://github.com/davidgamez-ai/llm#readme",
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "typescript": "^7.0.2"
+  }
+}
