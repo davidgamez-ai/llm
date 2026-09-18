@@ -7,10 +7,6 @@ import { encode, decode, vocabularySize } from "gpt-tokenizer/encoding/r50k_base
 class BPETokenizer {
   private readonly _vocabularySize: number = vocabularySize;
 
-  constructor() {
-    console.log(`Vocabulary size: ${this._vocabularySize}`);
-  }
-
   // The number of unique tokens in the r50k_base vocabulary.
   get vocabularySize(): number {
     return this._vocabularySize;

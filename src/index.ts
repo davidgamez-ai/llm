@@ -22,4 +22,4 @@ const embeddings = new Embedding();
 embeddings.build();
 
 const tstEmbeddings:number[][] = embeddings.getEmbedding("I am a fish");
-console.log(tstEmbeddings);
+

@@ -5,9 +5,6 @@ import { encode, decode, vocabularySize } from "gpt-tokenizer/encoding/r50k_base
 // vocabulary to build, so there is no train() method.
 class BPETokenizer {
     _vocabularySize = vocabularySize;
-    constructor() {
-        console.log(`Vocabulary size: ${this._vocabularySize}`);
-    }
     // The number of unique tokens in the r50k_base vocabulary.
     get vocabularySize() {
         return this._vocabularySize;

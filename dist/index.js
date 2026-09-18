@@ -12,4 +12,3 @@ const embeddings = new Embedding();
 //Build the matrix
 embeddings.build();
 const tstEmbeddings = embeddings.getEmbedding("I am a fish");
-console.log(tstEmbeddings);
