@@ -7,8 +7,8 @@
   "scripts": {
     "test": "tsc && node --test \"dist/test/**/*.test.js\"",
     "build": "tsc",
-    "count-chars": "tsc && node dist/src/countCharacters.js",
-    "tokenize": "tsc && node dist/src/index.js"
+    "count-chars": "tsc && node dist/countCharacters.js",
+    "tokenize": "tsc && node dist/index.js"
   },
   "repository": {
     "type": "git",

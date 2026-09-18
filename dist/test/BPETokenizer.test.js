@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import BPETokenizer from "../src/BPETokenizer.js";
+import BPETokenizer from "../BPETokenizer.js";
 test("encode() returns an array of numeric token ids", () => {
     const tokenizer = new BPETokenizer();
     const ids = tokenizer.encode("Hello, world!");
