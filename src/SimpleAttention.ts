@@ -45,7 +45,7 @@ class SimpleAttention {
       }
 
       rawScores.push(scoresForToken);
-      console.log(`SimpleAttention| Raw scores for token ${i}:`, scoresForToken);
+    //  console.log(`SimpleAttention| Raw scores for token ${i}:`, scoresForToken);
     }
 
     // Step 4: normalize each token's row of raw scores with softmax, so it
@@ -60,7 +60,7 @@ class SimpleAttention {
       const total = exponentiatedScores.reduce((sum, score) => sum + score, 0);
       const softmaxScores = exponentiatedScores.map((score) => score / total);
 
-      console.log(`SimpleAttention| Softmax weights for token ${i}:`, softmaxScores);
+     // console.log(`SimpleAttention| Softmax weights for token ${i}:`, softmaxScores);
 
       return softmaxScores;
     });

@@ -1,7 +1,6 @@
 import * as path from "path";
 import Embedding from "./Embedding.js";
-import SimpleAttention from "./SimpleAttention.js";
-import Context from "./Context.js";
+import GPTAttention from "./GPTAttention.js";
 const filePath = path.join(import.meta.dirname, "..", "data", "the-verdict.txt");
 // const tokenizer = new BPETokenizer();
 // const encoded:number[] = tokenizer.encode("glory <|endoftext|> I am a fish");
@@ -23,9 +22,5 @@ const exampleEmbeddings = [[0.43, 0.15, 0.89],
     [0.77, 0.25, 0.10],
     [0.05, 0.80, 0.55]];
 console.log(`index| Got ${exampleEmbeddings.length} embedding vectors, each ${exampleEmbeddings[0]?.length ?? 0} values wide.`);
-const attention = new SimpleAttention();
-const attentionScores = attention.calculate(exampleEmbeddings);
-console.log("index| Attention scores (each row sums to 1):", attentionScores);
-const context = new Context();
-const contextExample = context.getContext(exampleEmbeddings, attentionScores);
-console.log(contextExample);
+const attention = new GPTAttention();
+attention.calculate(exampleEmbeddings);
