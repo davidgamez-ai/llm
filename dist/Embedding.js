@@ -42,7 +42,7 @@ class Embedding {
      * @param max - Exclusive upper bound of the random range. Defaults to 5.
      * @returns void. The resulting matrices are stored on the instance for use by getEmbedding.
      */
-    build(seed, min = -5, max = 5) {
+    build(seed, min = -3, max = 3) {
         const random = seed === undefined ? Math.random : this.createSeededRandom(seed);
         const buildMatrix = () => Array.from({ length: this.vocabSize }, () => Array.from({ length: this.embeddingSize }, () => min + random() * (max - min)));
         this.textEmbeddingMatrix = buildMatrix();

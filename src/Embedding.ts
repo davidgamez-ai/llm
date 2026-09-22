@@ -48,7 +48,7 @@ class Embedding {
    * @param max - Exclusive upper bound of the random range. Defaults to 5.
    * @returns void. The resulting matrices are stored on the instance for use by getEmbedding.
    */
-  build(seed?: number, min: number = -5, max: number = 5): void {
+  build(seed?: number, min: number = -3, max: number = 3): void {
     const random = seed === undefined ? Math.random : this.createSeededRandom(seed);
 
     const buildMatrix = () =>
