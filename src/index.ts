@@ -5,6 +5,7 @@ import Embedding from "./Embedding.js";
 import SimpleAttention from "./SimpleAttention.js";
 import Context from "./Context.js";
 import GPTAttention from "./GPTAttention.js";
+import MultiHeadAttention from "./MultiHeadAttention.js";
 
 const filePath = path.join(import.meta.dirname, "..", "data", "the-verdict.txt");
 
@@ -38,6 +39,6 @@ const exampleEmbeddings =
 
 console.log(`index| Got ${exampleEmbeddings.length} embedding vectors, each ${exampleEmbeddings[0]?.length ?? 0} values wide.`);
 
-const attention = new GPTAttention();
-attention.calculate(exampleEmbeddings);
+const multiHeadAttention = new MultiHeadAttention();
+multiHeadAttention.calculate(exampleEmbeddings);
 

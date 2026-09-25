@@ -1,6 +1,6 @@
 import * as path from "path";
 import Embedding from "./Embedding.js";
-import GPTAttention from "./GPTAttention.js";
+import MultiHeadAttention from "./MultiHeadAttention.js";
 const filePath = path.join(import.meta.dirname, "..", "data", "the-verdict.txt");
 // const tokenizer = new BPETokenizer();
 // const encoded:number[] = tokenizer.encode("glory <|endoftext|> I am a fish");
@@ -22,5 +22,5 @@ const exampleEmbeddings = [[0.43, 0.15, 0.89],
     [0.77, 0.25, 0.10],
     [0.05, 0.80, 0.55]];
 console.log(`index| Got ${exampleEmbeddings.length} embedding vectors, each ${exampleEmbeddings[0]?.length ?? 0} values wide.`);
-const attention = new GPTAttention();
-attention.calculate(exampleEmbeddings);
+const multiHeadAttention = new MultiHeadAttention();
+multiHeadAttention.calculate(exampleEmbeddings);

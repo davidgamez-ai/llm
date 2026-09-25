@@ -1,5 +1,6 @@
 import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
+import DEBUG from "./Debug.js";
 
 /**
  * Two embedding matrices, each mapping an id (a token id, or a sequence
@@ -59,7 +60,7 @@ class Embedding {
     this.textEmbeddingMatrix = buildMatrix();
     this.positionEmbeddingMatrix = buildMatrix();
 
-    console.log(
+    if(DEBUG.EMBEDDING) console.log(
       `Embeddings| Embedding matrices built. Rows: ${this.textEmbeddingMatrix.length}; columns: ${this.textEmbeddingMatrix[0].length}`
     );
   }
@@ -106,10 +107,12 @@ class Embedding {
 
     // Log every stage, not just the final result, so each step of the
     // calculation can be checked independently.
-    // console.log("Embedding| Token ids:", tokenIds);
-    // console.log("Embedding| Token embeddings:", tokenEmbeddings);
-    // console.log("Embedding| Position embeddings:", positionEmbeddings);
-    // console.log("Embedding| Combined embeddings:", combinedEmbeddings);
+    if(DEBUG.EMBEDDING) {
+      console.log("Embedding| Token ids:", tokenIds);
+      console.log("Embedding| Token embeddings:", tokenEmbeddings);
+      console.log("Embedding| Position embeddings:", positionEmbeddings);
+      console.log("Embedding| Combined embeddings:", combinedEmbeddings);
+    }
 
     return combinedEmbeddings;
   }

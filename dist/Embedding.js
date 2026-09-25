@@ -1,5 +1,6 @@
 import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
+import DEBUG from "./Debug.js";
 /**
  * Two embedding matrices, each mapping an id (a token id, or a sequence
  * position) to a vector of embeddingSize random values. The vocabulary size
@@ -47,7 +48,8 @@ class Embedding {
         const buildMatrix = () => Array.from({ length: this.vocabSize }, () => Array.from({ length: this.embeddingSize }, () => min + random() * (max - min)));
         this.textEmbeddingMatrix = buildMatrix();
         this.positionEmbeddingMatrix = buildMatrix();
-        console.log(`Embeddings| Embedding matrices built. Rows: ${this.textEmbeddingMatrix.length}; columns: ${this.textEmbeddingMatrix[0].length}`);
+        if (DEBUG.EMBEDDING)
+            console.log(`Embeddings| Embedding matrices built. Rows: ${this.textEmbeddingMatrix.length}; columns: ${this.textEmbeddingMatrix[0].length}`);
     }
     /**
      * Tokenizes text with BPETokenizer, then for each resulting token looks up
@@ -86,10 +88,12 @@ class Embedding {
         }
         // Log every stage, not just the final result, so each step of the
         // calculation can be checked independently.
-        // console.log("Embedding| Token ids:", tokenIds);
-        // console.log("Embedding| Token embeddings:", tokenEmbeddings);
-        // console.log("Embedding| Position embeddings:", positionEmbeddings);
-        // console.log("Embedding| Combined embeddings:", combinedEmbeddings);
+        if (DEBUG.EMBEDDING) {
+            console.log("Embedding| Token ids:", tokenIds);
+            console.log("Embedding| Token embeddings:", tokenEmbeddings);
+            console.log("Embedding| Position embeddings:", positionEmbeddings);
+            console.log("Embedding| Combined embeddings:", combinedEmbeddings);
+        }
         return combinedEmbeddings;
     }
     /**
