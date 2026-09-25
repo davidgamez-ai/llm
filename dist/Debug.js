@@ -7,6 +7,8 @@ const DEBUG = {
     /** Switches on log output for the attention weight calculation */
     ATTENTION: false,
     /** Switches on log output for the context vector calculation */
-    CONTEXT: false
+    CONTEXT: false,
+    /** Switches on log output for the feed forward network */
+    FEED_FORWARD: false
 };
 export default DEBUG;

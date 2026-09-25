@@ -15,6 +15,7 @@ class Hyperparameters {
   private readonly _training: boolean;
   private readonly _numberAttentionHeads: number;
   private readonly _numberTransformerBlocks: number;
+  private readonly _batchSize: number;
 
   /**
    * Creates a Hyperparameters instance.
@@ -33,9 +34,12 @@ class Hyperparameters {
    * multi-head attention. Must be a positive whole number.
    * @param numberTransformerBlocks - The number of transformer blocks stacked
    * in the model. Must be a positive whole number.
+   * @param batchSize - The number of input sequences processed together in
+   * one batch. Must be a positive whole number.
    * @throws RangeError if dropoutRate is less than 0, greater than 1 or NaN.
    * @throws RangeError if numberAttentionHeads is not a positive whole number.
    * @throws RangeError if numberTransformerBlocks is not a positive whole number.
+   * @throws RangeError if batchSize is not a positive whole number.
    */
   constructor(
     embeddingSize: number = 3,
@@ -44,7 +48,8 @@ class Hyperparameters {
     dropoutRate: number = 0.0,
     training: boolean = true,
     numberAttentionHeads: number = 5,
-    numberTransformerBlocks: number = 12
+    numberTransformerBlocks: number = 12,
+    batchSize: number = 2
   ) {
     // Written as a negated range check so that NaN, which fails every
     // comparison, is rejected along with values outside [0, 1].
@@ -67,6 +72,13 @@ class Hyperparameters {
       );
     }
 
+    // Same positive whole number check as numberAttentionHeads.
+    if (!(Number.isInteger(batchSize) && batchSize > 0)) {
+      throw new RangeError(
+        `Hyperparameters| batchSize must be a positive whole number; got ${batchSize}`
+      );
+    }
+
     this._embeddingSize = embeddingSize;
     this._contextLength = contextLength;
     this._vocabularySize = new BPETokenizer().vocabularySize;
@@ -75,6 +87,7 @@ class Hyperparameters {
     this._training = training;
     this._numberAttentionHeads = numberAttentionHeads;
     this._numberTransformerBlocks = numberTransformerBlocks;
+    this._batchSize = batchSize;
   }
 
   /** The size of each token embedding vector. */
@@ -119,6 +132,11 @@ class Hyperparameters {
   /** The number of transformer blocks stacked in the model. */
   get numberTransformerBlocks(): number {
     return this._numberTransformerBlocks;
+  }
+
+  /** The number of input sequences processed together in one batch. */
+  get batchSize(): number {
+    return this._batchSize;
   }
 
   /**
