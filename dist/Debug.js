@@ -14,6 +14,8 @@ const DEBUG = {
     TRANSFORMER: false,
     /** Switches on log output for the GPT model */
     GPT_MODEL: false,
+    /** Switches on log output for the linear output layer */
+    LINEAR_OUTPUT_LAYER: false,
     /** Enables verbose log output, including tables of weights, etc. */
     VERBOSE: false
 };

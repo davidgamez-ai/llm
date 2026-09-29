@@ -2,30 +2,36 @@ import Hyperparameters from "./Hyperparameters.js";
 import Embedding from "./Embedding.js";
 import Transformer from "./Transformer.js";
 import LayerNormalization from "./LayerNormalization.js";
+import LinearOutputLayer from "./LinearOutputLayer.js";
 import DEBUG from "./Debug.js";
 /**
  * The GPT model. It converts a sequence of token ids into embeddings,
  * applies dropout to them (training mode only), then passes them through a
  * stack of transformer blocks in sequence, with the output of each block
- * becoming the input to the next. Finally, layer normalization is applied
- * to the output of the last transformer block.
+ * becoming the input to the next. Layer normalization is then applied to the
+ * output of the last transformer block, and the linear output layer turns
+ * the result into logits (training mode) or a probability distribution over
+ * the next token (inference mode).
  */
 class GPTModel {
     /** Converts token ids into combined token and position embeddings. */
     embedding;
     /** The transformer blocks, applied in array order. There are numberTransformerBlocks of them. */
     transformers;
+    /** Maps the final normalized token vectors to a score for every token in the vocabulary. */
+    linearOutputLayer;
     /** Probability, between 0 and 1, that each embedding value is dropped (set to zero) by dropout. */
     dropoutRate;
     /** True in training mode, when dropout is applied to the embeddings; false in inference mode, when it is skipped. */
     training;
     /**
-     * Creates a GPTModel with an Embedding, whose matrices are built
-     * immediately, and numberTransformerBlocks Transformer instances, all
-     * built from the same Hyperparameters so their dimensions match.
+     * Creates a GPTModel with an Embedding and a LinearOutputLayer, whose
+     * matrices are built immediately, and numberTransformerBlocks Transformer
+     * instances, all built from the same Hyperparameters so their dimensions
+     * match.
      *
-     * @param hyperparameters - Source of numberTransformerBlocks, dropoutRate and training, and passed on to Embedding and each Transformer. Defaults to a new Hyperparameters instance.
-     * @param seed - Optional seed passed to Embedding.build so the embedding matrices are reproducible. When omitted, they are random on every run.
+     * @param hyperparameters - Source of numberTransformerBlocks, dropoutRate and training, and passed on to Embedding, each Transformer and LinearOutputLayer. Defaults to a new Hyperparameters instance.
+     * @param seed - Optional seed passed to Embedding.build and LinearOutputLayer.build so their matrices are reproducible. When omitted, they are random on every run.
      */
     constructor(hyperparameters = new Hyperparameters(), seed) {
         this.dropoutRate = hyperparameters.dropoutRate;
@@ -33,14 +39,22 @@ class GPTModel {
         this.embedding = new Embedding(hyperparameters);
         this.embedding.build(seed);
         this.transformers = Array.from({ length: hyperparameters.numberTransformerBlocks }, () => new Transformer(hyperparameters));
+        /*
+         * The output layer's weight matrix has the same dimensions as the
+         * embedding's token matrix and is built the same way, so the same seed
+         * would make the two matrices identical. Offsetting the seed keeps them
+         * reproducible but independent.
+         */
+        this.linearOutputLayer = new LinearOutputLayer(hyperparameters);
+        this.linearOutputLayer.build(seed === undefined ? undefined : seed + 1);
     }
     /**
      * Runs tokenized text through the model: embedding, dropout on the
-     * embeddings (training mode only), each transformer block in turn, then
-     * layer normalization of the final block's output.
+     * embeddings (training mode only), each transformer block in turn, layer
+     * normalization of the final block's output, then the linear output layer.
      *
      * @param tokenIds - Token ids of the tokenized input text, in sequence order.
-     * @returns The layer normalized output of the final transformer block: one row per token, in token order, each row embeddingSize values wide.
+     * @returns Each row vocabularySize values wide: in training mode the logits, one row per token, in token order; in inference mode a single row of probabilities for the next token.
      */
     calculate(tokenIds) {
         const embeddings = this.embedding.getEmbeddingFromTokens(tokenIds);
@@ -65,12 +79,13 @@ class GPTModel {
             transformerOutput = transformer.calculate(transformerOutput);
         }
         // Final layer normalization, applied to each token vector independently, as in GPT-2.
-        const output = transformerOutput.map((vector) => LayerNormalization.calculate(vector));
+        const normalizedOutput = transformerOutput.map((vector) => LayerNormalization.calculate(vector));
         if (DEBUG.GPT_MODEL) {
             console.log("GPTModel| Output of final layer normalization (one row per token):");
-            console.table(output);
+            console.table(normalizedOutput);
         }
-        return output;
+        // Logits for every token in training mode; probabilities for the next token in inference mode.
+        return this.linearOutputLayer.calculate(normalizedOutput);
     }
 }
 export default GPTModel;

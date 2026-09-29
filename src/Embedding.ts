@@ -1,6 +1,7 @@
 import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
 import DEBUG from "./Debug.js";
+import createSeededRandom from "./SeededRandom.js";
 
 /**
  * Two embedding matrices, each mapping an id (a token id, or a sequence
@@ -50,7 +51,7 @@ class Embedding {
    * @returns void. The resulting matrices are stored on the instance for use by getEmbedding.
    */
   build(seed?: number, min: number = -3, max: number = 3): void {
-    const random = seed === undefined ? Math.random : this.createSeededRandom(seed);
+    const random = seed === undefined ? Math.random : createSeededRandom(seed);
 
     const buildMatrix = () =>
       Array.from({ length: this.vocabSize }, () =>
@@ -142,30 +143,6 @@ class Embedding {
     } else {
       console.log(`Embedding| ${label}. Length: ${array.length}`);
     }
-  }
-
-  /**
-   * mulberry32: a small, fast seeded PRNG. Deterministically derives a
-   * stream of 32-bit states from the seed and scrambles each one via
-   * Math.imul/xorshift into a uniform value in [0, 1), so build() can
-   * produce a reproducible embedding matrix for a given seed.
-   *
-   * @param seed - Initial 32-bit PRNG state.
-   * @returns A function that, on each call, advances the PRNG state and returns the next pseudo-random value in [0, 1).
-   */
-  private createSeededRandom(seed: number): () => number {
-    let state = seed;
-
-    return () => {
-      // Advance the state with a fixed odd increment (32-bit overflow wraps via `| 0`).
-      state = (state + 0x6d2b79f5) | 0;
-
-      // Scramble the state (xorshift + multiply) so consecutive states don't correlate.
-      let t = Math.imul(state ^ (state >>> 15), 1 | state);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
   }
 }
 
