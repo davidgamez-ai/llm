@@ -16,6 +16,7 @@ class Hyperparameters {
   private readonly _numberAttentionHeads: number;
   private readonly _numberTransformerBlocks: number;
   private readonly _batchSize: number;
+  private readonly _bias: boolean;
 
   /**
    * Creates a Hyperparameters instance.
@@ -23,33 +24,35 @@ class Hyperparameters {
    * @param embeddingSize - The size of each token embedding vector.
    * @param contextLength - The number of tokens of context the model
    * operates over at once.
-   * @param weightMatrixColumns - The number of columns in each of the
-   * query/key/value weight matrices, i.e. the size of the projected
-   * vectors those matrices produce.
    * @param dropoutRate - The probability, between 0 and 1 inclusive, that
    * any given value is dropped (set to zero) during dropout.
    * @param training - True for training mode, in which dropout is applied;
    * false for inference mode, in which dropout is skipped.
    * @param numberAttentionHeads - The number of attention heads used in
-   * multi-head attention. Must be a positive whole number.
+   * multi-head attention. Must be a positive whole number that divides
+   * embeddingSize exactly.
    * @param numberTransformerBlocks - The number of transformer blocks stacked
    * in the model. Must be a positive whole number.
    * @param batchSize - The number of input sequences processed together in
    * one batch. Must be a positive whole number.
+   * @param bias - True if the linear layers of the feed forward network add
+   * a bias to their outputs; false if they do not.
    * @throws RangeError if dropoutRate is less than 0, greater than 1 or NaN.
    * @throws RangeError if numberAttentionHeads is not a positive whole number.
+   * @throws RangeError if embeddingSize divided by numberAttentionHeads is
+   * not a whole number.
    * @throws RangeError if numberTransformerBlocks is not a positive whole number.
    * @throws RangeError if batchSize is not a positive whole number.
    */
   constructor(
-    embeddingSize: number = 3,
+    embeddingSize: number = 768,
     contextLength: number = 1024,
-    weightMatrixColumns: number = 2,
-    dropoutRate: number = 0.0,
+    dropoutRate: number = 0.1,
     training: boolean = true,
-    numberAttentionHeads: number = 5,
+    numberAttentionHeads: number = 12,
     numberTransformerBlocks: number = 12,
-    batchSize: number = 2
+    batchSize: number = 2,
+    bias: boolean = false
   ) {
     // Written as a negated range check so that NaN, which fails every
     // comparison, is rejected along with values outside [0, 1].
@@ -62,6 +65,19 @@ class Hyperparameters {
     if (!(Number.isInteger(numberAttentionHeads) && numberAttentionHeads > 0)) {
       throw new RangeError(
         `Hyperparameters| numberAttentionHeads must be a positive whole number; got ${numberAttentionHeads}`
+      );
+    }
+
+    /*
+     * Each head produces context vectors weightMatrixColumns wide, and
+     * MultiHeadAttention concatenates the heads' outputs, so the combined
+     * width only equals embeddingSize if the heads split it evenly.
+     */
+    const weightMatrixColumns = embeddingSize / numberAttentionHeads;
+    if (!Number.isInteger(weightMatrixColumns)) {
+      throw new RangeError(
+        `Hyperparameters| embeddingSize (${embeddingSize}) divided by numberAttentionHeads ` +
+        `(${numberAttentionHeads}) must be a whole number; got ${weightMatrixColumns}`
       );
     }
 
@@ -88,6 +104,7 @@ class Hyperparameters {
     this._numberAttentionHeads = numberAttentionHeads;
     this._numberTransformerBlocks = numberTransformerBlocks;
     this._batchSize = batchSize;
+    this._bias = bias;
   }
 
   /** The size of each token embedding vector. */
@@ -102,7 +119,9 @@ class Hyperparameters {
 
   /**
    * The number of columns in each of the query/key/value weight matrices,
-   * i.e. the size of the projected vectors those matrices produce.
+   * i.e. the size of the projected vectors those matrices produce. Equal to
+   * embeddingSize / numberAttentionHeads, so the concatenated output of all
+   * the attention heads is embeddingSize wide.
    */
   get weightMatrixColumns(): number {
     return this._weightMatrixColumns;
@@ -137,6 +156,14 @@ class Hyperparameters {
   /** The number of input sequences processed together in one batch. */
   get batchSize(): number {
     return this._batchSize;
+  }
+
+  /**
+   * True if the linear layers of the feed forward network add a bias to
+   * their outputs; false if they do not.
+   */
+  get bias(): boolean {
+    return this._bias;
   }
 
   /**

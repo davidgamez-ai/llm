@@ -45,8 +45,8 @@ class Embedding {
    * versus by sequence position).
    *
    * @param seed - Optional PRNG seed. When provided, the same seed always produces the same matrices, since Math.random() cannot be seeded and would otherwise make results unreproducible between runs. When omitted, Math.random() is used and the matrices differ on every call.
-   * @param min - Inclusive lower bound of the random range. Defaults to -5.
-   * @param max - Exclusive upper bound of the random range. Defaults to 5.
+   * @param min - Inclusive lower bound of the random range. Defaults to -3.
+   * @param max - Exclusive upper bound of the random range. Defaults to 3.
    * @returns void. The resulting matrices are stored on the instance for use by getEmbedding.
    */
   build(seed?: number, min: number = -3, max: number = 3): void {
@@ -66,20 +66,28 @@ class Embedding {
   }
 
   /**
-   * Tokenizes text with BPETokenizer, then for each resulting token looks up
-   * its row in textEmbeddingMatrix by token id, and its row in
-   * positionEmbeddingMatrix by the token's position in the sequence, and
-   * adds the two rows together. Each stage (token ids, token embeddings,
-   * position embeddings, combined embeddings) is stored in its own array and
-   * logged so intermediate results can be inspected, rather than only
-   * returning the final combined result.
+   * Tokenizes text with BPETokenizer and returns the combined embeddings of
+   * the resulting tokens, as calculated by getEmbeddingFromTokens.
    *
    * @param text - Raw input text to embed.
    * @returns One combined embedding vector per token, in token order. Each vector is the token's textEmbeddingMatrix row plus its positionEmbeddingMatrix row.
    */
   getEmbedding(text: string): number[][] {
-    const tokenIds = new BPETokenizer().encode(text);
+    return this.getEmbeddingFromTokens(new BPETokenizer().encode(text));
+  }
 
+  /**
+   * For each token id, looks up its row in textEmbeddingMatrix by token id,
+   * and its row in positionEmbeddingMatrix by the token's position in the
+   * sequence, and adds the two rows together. Each stage (token ids, token
+   * embeddings, position embeddings, combined embeddings) is stored in its
+   * own array and logged so intermediate results can be inspected, rather
+   * than only returning the final combined result.
+   *
+   * @param tokenIds - Token ids of already tokenized text, in sequence order.
+   * @returns One combined embedding vector per token, in token order. Each vector is the token's textEmbeddingMatrix row plus its positionEmbeddingMatrix row.
+   */
+  getEmbeddingFromTokens(tokenIds: number[]): number[][] {
     const tokenEmbeddings: number[][] = [];
     const positionEmbeddings: number[][] = [];
     const combinedEmbeddings: number[][] = [];
@@ -108,13 +116,32 @@ class Embedding {
     // Log every stage, not just the final result, so each step of the
     // calculation can be checked independently.
     if(DEBUG.EMBEDDING) {
-      console.log("Embedding| Token ids:", tokenIds);
-      console.log("Embedding| Token embeddings:", tokenEmbeddings);
-      console.log("Embedding| Position embeddings:", positionEmbeddings);
-      console.log("Embedding| Combined embeddings:", combinedEmbeddings);
+      this.logArray("Token ids", tokenIds);
+      this.logArray("Token embeddings", tokenEmbeddings);
+      this.logArray("Position embeddings", positionEmbeddings);
+      this.logArray("Combined embeddings", combinedEmbeddings);
     }
 
     return combinedEmbeddings;
+  }
+
+  /**
+   * Logs a one or two dimensional array. When DEBUG.VERBOSE is true the
+   * whole array is printed with console.table; otherwise only its
+   * dimensions are printed, which keeps the output short for large arrays.
+   *
+   * @param label - Name of the array, printed before its contents or dimensions.
+   * @param array - The array to log: a vector, or a matrix with one row per token.
+   */
+  private logArray(label: string, array: number[] | number[][]): void {
+    if (DEBUG.VERBOSE) {
+      console.log(`Embedding| ${label}:`);
+      console.table(array);
+    } else if (Array.isArray(array[0])) {
+      console.log(`Embedding| ${label}. Rows: ${array.length}; columns: ${array[0].length}`);
+    } else {
+      console.log(`Embedding| ${label}. Length: ${array.length}`);
+    }
   }
 
   /**

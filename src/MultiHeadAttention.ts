@@ -13,14 +13,18 @@ class MultiHeadAttention {
   /** The attention heads, one GPTAttention instance per head, in head order. */
   attentionHeads: GPTAttention[];
 
+  /** Width of each token embedding; the concatenated context vectors should be the same width. */
+  embeddingSize: number;
+
   /**
    * Creates a MultiHeadAttention with numberAttentionHeads GPTAttention
    * heads, each built from the same Hyperparameters so they all share the
    * same dimensions, dropout rate and training mode.
    *
-   * @param hyperparameters - Source of numberAttentionHeads, and passed on to each GPTAttention head. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of numberAttentionHeads and embeddingSize, and passed on to each GPTAttention head. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
+    this.embeddingSize = hyperparameters.embeddingSize;
     this.attentionHeads = Array.from(
       { length: hyperparameters.numberAttentionHeads },
       () => new GPTAttention(hyperparameters)
@@ -34,7 +38,9 @@ class MultiHeadAttention {
    * embeddings, then concatenates the heads' context vectors token by
    * token. Row i of the result is head 0's context vector for token i,
    * followed by head 1's, and so on, giving a tokenCount x
-   * (numberAttentionHeads * weightMatrixColumns) matrix.
+   * (numberAttentionHeads * weightMatrixColumns) matrix. Because
+   * weightMatrixColumns = embeddingSize / numberAttentionHeads, each row
+   * should be embeddingSize wide; an error is logged for any row that is not.
    *
    * @param embeddings - Token embeddings as produced by Embedding.getEmbedding(): one row per token, each row embeddingSize values wide.
    * @returns The concatenated context vectors: one row per token, in token order, each holding every head's context vector for that token, in head order.
@@ -54,6 +60,25 @@ class MultiHeadAttention {
     const contextVectors: number[][] = embeddings.map((_, token) =>
       headContextVectors.flatMap((headVectors) => headVectors[token])
     );
+
+    /*
+     * Check that every concatenated context vector is embeddingSize wide,
+     * so the output can be fed to later layers that expect token vectors
+     * of the same width as the embeddings. Mismatches are always logged;
+     * success is only logged when attention debugging is on.
+     */
+    const wrongLengthTokens = contextVectors
+      .map((vector, token) => ({ token, length: vector.length }))
+      .filter(({ length }) => length !== this.embeddingSize);
+    if (wrongLengthTokens.length > 0) {
+      wrongLengthTokens.forEach(({ token, length }) =>
+        console.error(
+          `MultiHeadAttention| Context vector for token ${token} has length ${length}; expected embeddingSize ${this.embeddingSize}.`
+        )
+      );
+    } else if (DEBUG.ATTENTION) {
+      console.log(`MultiHeadAttention| All context vectors have length embeddingSize (${this.embeddingSize}).`);
+    }
 
     if (DEBUG.CONTEXT) {
       console.log("MultiHeadAttention| Concatenated context vectors (one row per token):");

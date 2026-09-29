@@ -3,59 +3,52 @@ import DEBUG from "./Debug.js";
 
 /**
  * The position-wise feed forward network used in each GPT transformer
- * block: a linear layer that expands each token vector from embeddingSize
+ * block: a linear layer that expands a token vector from embeddingSize
  * to 4 * embeddingSize values, a GELU activation, then a second linear
  * layer that projects it back down to embeddingSize values.
  *
- * Input and output are both batchSize x contextLength x embeddingSize.
- * The linear layers act only on the last dimension, so every token in
- * every sequence of the batch goes through the same weights independently.
+ * The network processes one token vector at a time. Every token in a
+ * sequence goes through the same weights independently, so a whole
+ * sequence is processed by calling calculate() on each of its tokens.
  * The shapes as data flows through the network are:
  *
- * - First linear layer: batchSize x contextLength x embeddingSize in,
- *   batchSize x contextLength x (4 * embeddingSize) out.
- * - GELU: batchSize x contextLength x (4 * embeddingSize) in and out.
- * - Second linear layer: batchSize x contextLength x (4 * embeddingSize)
- *   in, batchSize x contextLength x embeddingSize out.
+ * - First linear layer: embeddingSize in, 4 * embeddingSize out.
+ * - GELU: 4 * embeddingSize in and out.
+ * - Second linear layer: 4 * embeddingSize in, embeddingSize out.
  */
 class FeedForward {
-  /** Number of sequences in each batch. */
-  batchSize: number;
-
-  /** Maximum number of tokens in each sequence. */
-  contextLength: number;
-
-  /** Width of each token vector at the input and output of the network. */
+  /** Width of the token vector at the input and output of the network. */
   embeddingSize: number;
 
-  /** Width of each token vector between the two linear layers: 4 * embeddingSize. */
+  /** Width of the token vector between the two linear layers: 4 * embeddingSize. */
   hiddenSize: number;
+
+  /** True if the linear layers add a bias to their outputs; false if they do not. */
+  bias: boolean;
 
   /** First linear layer weights built by build(): embeddingSize rows by hiddenSize columns. */
   firstLayerWeights: number[][] = [];
 
-  /** First linear layer biases built by build(): one per hidden unit, hiddenSize values. */
+  /** First linear layer biases built by build(): one per hidden unit, hiddenSize values. Empty when bias is false. */
   firstLayerBiases: number[] = [];
 
   /** Second linear layer weights built by build(): hiddenSize rows by embeddingSize columns. */
   secondLayerWeights: number[][] = [];
 
-  /** Second linear layer biases built by build(): one per output unit, embeddingSize values. */
+  /** Second linear layer biases built by build(): one per output unit, embeddingSize values. Empty when bias is false. */
   secondLayerBiases: number[] = [];
 
   /**
-   * Creates a FeedForward, copying batchSize, contextLength and
-   * embeddingSize from the given Hyperparameters so this instance always
-   * matches the values used elsewhere in the application, then builds the
-   * network.
+   * Creates a FeedForward, copying embeddingSize and bias from the given
+   * Hyperparameters so this instance always matches the values used
+   * elsewhere in the application, then builds the network.
    *
-   * @param hyperparameters - Source of batchSize, contextLength and embeddingSize. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of embeddingSize and bias. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
-    this.batchSize = hyperparameters.batchSize;
-    this.contextLength = hyperparameters.contextLength;
     this.embeddingSize = hyperparameters.embeddingSize;
     this.hiddenSize = 4 * this.embeddingSize;
+    this.bias = hyperparameters.bias;
 
     this.build();
   }
@@ -68,6 +61,8 @@ class FeedForward {
    * parameters, so nothing is built for it. Weights and biases are
    * initialized the same way as PyTorch's nn.Linear: drawn uniformly from
    * [-1/sqrt(fanIn), 1/sqrt(fanIn)), where fanIn is the layer's input width.
+   * Biases are only built when bias is true; otherwise the bias arrays are
+   * left empty.
    *
    * @returns void. The resulting weights and biases are stored on the instance.
    */
@@ -92,15 +87,14 @@ class FeedForward {
     };
 
     this.firstLayerWeights = buildMatrix(this.embeddingSize, this.hiddenSize);
-    this.firstLayerBiases = buildBiases(this.embeddingSize, this.hiddenSize);
     this.secondLayerWeights = buildMatrix(this.hiddenSize, this.embeddingSize);
-    this.secondLayerBiases = buildBiases(this.hiddenSize, this.embeddingSize);
+    this.firstLayerBiases = this.bias ? buildBiases(this.embeddingSize, this.hiddenSize) : [];
+    this.secondLayerBiases = this.bias ? buildBiases(this.hiddenSize, this.embeddingSize) : [];
 
     if (DEBUG.FEED_FORWARD) {
       console.log(
-        `FeedForward| Network built. Input: ${this.batchSize} x ${this.contextLength} x ${this.embeddingSize}; ` +
-        `hidden: ${this.batchSize} x ${this.contextLength} x ${this.hiddenSize}; ` +
-        `output: ${this.batchSize} x ${this.contextLength} x ${this.embeddingSize}`
+        `FeedForward| Network built. Input: ${this.embeddingSize}; ` +
+        `hidden: ${this.hiddenSize}; output: ${this.embeddingSize}`
       );
       console.log("FeedForward| First layer weights:");
       console.table(this.firstLayerWeights);
@@ -110,21 +104,25 @@ class FeedForward {
   }
 
   /**
-   * Runs the input through the network: first linear layer, GELU, then
-   * second linear layer. Each token vector is processed independently.
+   * Runs a single token vector through the network: first linear layer,
+   * GELU, then second linear layer.
    *
-   * @param input - A batchSize x contextLength x embeddingSize tensor: one matrix per sequence, one row per token. Sequences may be shorter than contextLength.
-   * @returns A tensor with the same batchSize x contextLength x embeddingSize shape as the input.
+   * @param token - The embedding of one token: embeddingSize values.
+   * @returns The transformed token vector: embeddingSize values.
    */
-  calculate(input: number[][][]): number[][][] {
+  calculate(token: number[]): number[] {
     /*
-     * A linear layer applied to a single token vector: each output value is
-     * the dot product of the vector with one column of the weight matrix,
-     * plus that column's bias.
+     * A linear layer applied to a single vector: each output value is the
+     * dot product of the vector with one column of the weight matrix, plus
+     * that column's bias when bias is true. The dot product starts from the
+     * bias, or from 0 when there is no bias.
      */
     const linear = (vector: number[], weights: number[][], biases: number[]): number[] =>
-      biases.map((bias, column) =>
-        vector.reduce((sum, value, row) => sum + value * weights[row][column], bias)
+      weights[0].map((_, column) =>
+        vector.reduce(
+          (sum, value, row) => sum + value * weights[row][column],
+          this.bias ? biases[column] : 0
+        )
       );
 
     /*
@@ -136,18 +134,12 @@ class FeedForward {
     const gelu = (x: number): number =>
       0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x ** 3)));
 
-    const output = input.map((sequence) =>
-      sequence.map((token) => {
-        const hidden = linear(token, this.firstLayerWeights, this.firstLayerBiases).map(gelu);
-        return linear(hidden, this.secondLayerWeights, this.secondLayerBiases);
-      })
-    );
+    const hidden = linear(token, this.firstLayerWeights, this.firstLayerBiases).map(gelu);
+    const output = linear(hidden, this.secondLayerWeights, this.secondLayerBiases);
 
     if (DEBUG.FEED_FORWARD) {
-      output.forEach((sequence, index) => {
-        console.log(`FeedForward| Output for sequence ${index} (one row per token):`);
-        console.table(sequence);
-      });
+      console.log("FeedForward| Output:");
+      console.table(output);
     }
 
     return output;
