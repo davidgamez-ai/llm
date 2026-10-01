@@ -4,53 +4,79 @@ import DEBUG from "./Debug.js";
 import createSeededRandom from "./SeededRandom.js";
 /**
  * Two embedding matrices, each mapping an id (a token id, or a sequence
- * position) to a vector of embeddingSize random values. The vocabulary size
- * and embedding size are taken from Hyperparameters, so they always match
- * the values used elsewhere in the application.
+ * position) to a vector of embeddingSize random values. The token embedding
+ * matrix has one row per vocabulary token; the position embedding matrix has
+ * one row per position in the context window, as in GPT-2. The vocabulary
+ * size, context length and embedding size are taken from Hyperparameters, so
+ * they always match the values used elsewhere in the application.
  */
 class Embedding {
-    /** Number of rows in each embedding matrix, i.e. the number of distinct token ids supported. */
+    /** Number of rows in the token embedding matrix, i.e. the number of distinct token ids supported. */
     vocabSize;
+    /** Number of rows in the position embedding matrix, i.e. the maximum number of tokens in a sequence. */
+    contextLength;
     /** Number of columns in each embedding matrix, i.e. the width of each embedding vector. */
     embeddingSize;
+    /**
+     * Standard deviation of the normal distribution (mean 0) used to
+     * initialize the position embedding matrix. GPT-2's original
+     * implementation uses 0.01 for its position embeddings (wpe).
+     */
+    positionEmbeddingStandardDeviation;
     // The token embedding matrix built by build(): one row per vocabulary
     // token, each row embeddingSize values wide. Looked up by token id.
     textEmbeddingMatrix = [];
-    // The position embedding matrix built by build(): same dimensions as
-    // textEmbeddingMatrix, but looked up by a token's position in the
-    // sequence rather than by its id.
+    // The position embedding matrix built by build(): one row per position in
+    // the context window (contextLength rows), each row embeddingSize values
+    // wide. Looked up by a token's position in the sequence rather than by its id.
     positionEmbeddingMatrix = [];
     /**
-     * Creates an Embedding, copying vocabSize and embeddingSize from the given
-     * Hyperparameters so this instance always matches the values used
-     * elsewhere in the application.
+     * Creates an Embedding, copying vocabSize, contextLength, embeddingSize
+     * and positionEmbeddingStandardDeviation from the given Hyperparameters so
+     * this instance always matches the values used elsewhere in the
+     * application.
      *
-     * @param hyperparameters - Source of vocabularySize and embeddingSize. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of vocabularySize, contextLength, embeddingSize and positionEmbeddingStandardDeviation. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.vocabSize = hyperparameters.vocabularySize;
+        this.contextLength = hyperparameters.contextLength;
         this.embeddingSize = hyperparameters.embeddingSize;
+        this.positionEmbeddingStandardDeviation = hyperparameters.positionEmbeddingStandardDeviation;
     }
     /**
-     * Builds two vocabSize x embeddingSize matrices, textEmbeddingMatrix and
-     * positionEmbeddingMatrix, each filled with values drawn uniformly from
-     * [min, max), stores them on the instance, and logs their dimensions.
-     * Both matrices share the same shape and random-generation procedure;
-     * they differ only in how getEmbedding looks rows up in them (by token id
-     * versus by sequence position).
+     * Builds the two embedding matrices, stores them on the instance, and logs
+     * their dimensions:
+     * - textEmbeddingMatrix: vocabSize x embeddingSize, filled with values
+     *   drawn uniformly from [min, max).
+     * - positionEmbeddingMatrix: contextLength x embeddingSize, initialized as
+     *   in GPT-2, with values drawn from a normal distribution with mean 0 and
+     *   standard deviation positionEmbeddingStandardDeviation (0.01 by default).
      *
      * @param seed - Optional PRNG seed. When provided, the same seed always produces the same matrices, since Math.random() cannot be seeded and would otherwise make results unreproducible between runs. When omitted, Math.random() is used and the matrices differ on every call.
-     * @param min - Inclusive lower bound of the random range. Defaults to -3.
-     * @param max - Exclusive upper bound of the random range. Defaults to 3.
+     * @param min - Inclusive lower bound of the token embedding random range. Defaults to -3.
+     * @param max - Exclusive upper bound of the token embedding random range. Defaults to 3.
      * @returns void. The resulting matrices are stored on the instance for use by getEmbedding.
      */
     build(seed, min = -3, max = 3) {
         const random = seed === undefined ? Math.random : createSeededRandom(seed);
-        const buildMatrix = () => Array.from({ length: this.vocabSize }, () => Array.from({ length: this.embeddingSize }, () => min + random() * (max - min)));
-        this.textEmbeddingMatrix = buildMatrix();
-        this.positionEmbeddingMatrix = buildMatrix();
-        if (DEBUG.EMBEDDING)
-            console.log(`Embeddings| Embedding matrices built. Rows: ${this.textEmbeddingMatrix.length}; columns: ${this.textEmbeddingMatrix[0].length}`);
+        /*
+         * Draws one sample from a normal distribution with mean 0 and the given
+         * standard deviation, using the Box-Muller transform to turn two uniform
+         * samples into a standard normal sample. 1 - random() lies in (0, 1], so
+         * Math.log never receives 0.
+         */
+        const randomNormal = (standardDeviation) => {
+            const u1 = 1 - random();
+            const u2 = random();
+            return standardDeviation * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+        };
+        this.textEmbeddingMatrix = Array.from({ length: this.vocabSize }, () => Array.from({ length: this.embeddingSize }, () => min + random() * (max - min)));
+        this.positionEmbeddingMatrix = Array.from({ length: this.contextLength }, () => Array.from({ length: this.embeddingSize }, () => randomNormal(this.positionEmbeddingStandardDeviation)));
+        if (DEBUG.EMBEDDING) {
+            console.log(`Embeddings| Token embedding matrix built. Rows: ${this.textEmbeddingMatrix.length}; columns: ${this.textEmbeddingMatrix[0].length}`);
+            console.log(`Embeddings| Position embedding matrix built. Rows: ${this.positionEmbeddingMatrix.length}; columns: ${this.positionEmbeddingMatrix[0].length}`);
+        }
     }
     /**
      * Tokenizes text with BPETokenizer and returns the combined embeddings of
@@ -72,8 +98,12 @@ class Embedding {
      *
      * @param tokenIds - Token ids of already tokenized text, in sequence order.
      * @returns One combined embedding vector per token, in token order. Each vector is the token's textEmbeddingMatrix row plus its positionEmbeddingMatrix row.
+     * @throws Error if there are more tokens than contextLength, since the position embedding matrix has no row for positions beyond the context window.
      */
     getEmbeddingFromTokens(tokenIds) {
+        if (tokenIds.length > this.contextLength) {
+            throw new Error(`Embedding| Sequence of ${tokenIds.length} tokens exceeds the context length of ${this.contextLength}`);
+        }
         const tokenEmbeddings = [];
         const positionEmbeddings = [];
         const combinedEmbeddings = [];

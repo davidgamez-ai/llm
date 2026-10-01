@@ -17,6 +17,7 @@ class Hyperparameters {
   private readonly _numberTransformerBlocks: number;
   private readonly _batchSize: number;
   private readonly _bias: boolean;
+  private readonly _positionEmbeddingStandardDeviation: number;
 
   /**
    * Creates a Hyperparameters instance.
@@ -37,12 +38,18 @@ class Hyperparameters {
    * one batch. Must be a positive whole number.
    * @param bias - True if the linear layers of the feed forward network add
    * a bias to their outputs; false if they do not.
+   * @param positionEmbeddingStandardDeviation - The standard deviation of the
+   * normal distribution (mean 0) used to initialize the position embedding
+   * matrix. Defaults to 0.01, the value used by the original GPT-2. Must be
+   * a finite number greater than or equal to 0.
    * @throws RangeError if dropoutRate is less than 0, greater than 1 or NaN.
    * @throws RangeError if numberAttentionHeads is not a positive whole number.
    * @throws RangeError if embeddingSize divided by numberAttentionHeads is
    * not a whole number.
    * @throws RangeError if numberTransformerBlocks is not a positive whole number.
    * @throws RangeError if batchSize is not a positive whole number.
+   * @throws RangeError if positionEmbeddingStandardDeviation is negative,
+   * infinite or NaN.
    */
   constructor(
     embeddingSize: number = 768,
@@ -52,7 +59,8 @@ class Hyperparameters {
     numberAttentionHeads: number = 12,
     numberTransformerBlocks: number = 12,
     batchSize: number = 2,
-    bias: boolean = false
+    bias: boolean = false,
+    positionEmbeddingStandardDeviation: number = 0.01
   ) {
     // Written as a negated range check so that NaN, which fails every
     // comparison, is rejected along with values outside [0, 1].
@@ -95,6 +103,14 @@ class Hyperparameters {
       );
     }
 
+    // Number.isFinite rejects NaN and Infinity; a negative standard deviation is meaningless.
+    if (!(Number.isFinite(positionEmbeddingStandardDeviation) && positionEmbeddingStandardDeviation >= 0)) {
+      throw new RangeError(
+        `Hyperparameters| positionEmbeddingStandardDeviation must be a finite number >= 0; ` +
+        `got ${positionEmbeddingStandardDeviation}`
+      );
+    }
+
     this._embeddingSize = embeddingSize;
     this._contextLength = contextLength;
     this._vocabularySize = new BPETokenizer().vocabularySize;
@@ -105,6 +121,7 @@ class Hyperparameters {
     this._numberTransformerBlocks = numberTransformerBlocks;
     this._batchSize = batchSize;
     this._bias = bias;
+    this._positionEmbeddingStandardDeviation = positionEmbeddingStandardDeviation;
   }
 
   /** The size of each token embedding vector. */
@@ -164,6 +181,14 @@ class Hyperparameters {
    */
   get bias(): boolean {
     return this._bias;
+  }
+
+  /**
+   * The standard deviation of the normal distribution (mean 0) used to
+   * initialize the position embedding matrix. The original GPT-2 uses 0.01.
+   */
+  get positionEmbeddingStandardDeviation(): number {
+    return this._positionEmbeddingStandardDeviation;
   }
 
   /**
