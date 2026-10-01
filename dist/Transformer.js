@@ -23,22 +23,30 @@ class Transformer {
     multiHeadAttention;
     /** The feed forward network stage of the block. */
     feedForward;
+    /** Layer normalization applied to the block's input, before multi-head attention. */
+    attentionLayerNormalization;
+    /** Layer normalization applied to the attention stage's output, before the feed forward network. */
+    feedForwardLayerNormalization;
     /** Probability, between 0 and 1, that each value of the feed forward output is dropped (set to zero) by dropout. */
     dropoutRate;
     /** True in training mode, when dropout is applied to the feed forward output; false in inference mode, when it is skipped. */
     training;
     /**
-     * Creates a Transformer with its own MultiHeadAttention and FeedForward
-     * instances, both built from the same Hyperparameters so their
-     * dimensions match, and copies dropoutRate and training from them.
+     * Creates a Transformer with its own MultiHeadAttention, FeedForward and
+     * two LayerNormalization instances, all built from the same
+     * Hyperparameters so their dimensions match, and copies dropoutRate and
+     * training from them. Each layer normalization has its own trainable
+     * scale and shift, so the two are separate instances.
      *
-     * @param hyperparameters - Source of dropoutRate and training, and passed on to MultiHeadAttention and FeedForward. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of dropoutRate and training, and passed on to MultiHeadAttention, FeedForward and LayerNormalization. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.dropoutRate = hyperparameters.dropoutRate;
         this.training = hyperparameters.training;
         this.multiHeadAttention = new MultiHeadAttention(hyperparameters);
         this.feedForward = new FeedForward(hyperparameters);
+        this.attentionLayerNormalization = new LayerNormalization(hyperparameters);
+        this.feedForwardLayerNormalization = new LayerNormalization(hyperparameters);
     }
     /**
      * Runs the token embeddings through the transformer block: layer
@@ -55,7 +63,7 @@ class Transformer {
      */
     calculate(embeddings) {
         // Normalize each token embedding independently before attention.
-        const normalizedEmbeddings = embeddings.map((embedding) => LayerNormalization.calculate(embedding));
+        const normalizedEmbeddings = embeddings.map((embedding) => this.attentionLayerNormalization.calculate(embedding));
         const attentionOutput = this.multiHeadAttention.calculate(normalizedEmbeddings);
         /*
          * Shortcut (residual) connection: add the original, unnormalized input
@@ -66,7 +74,7 @@ class Transformer {
          */
         const shortcutOutput = attentionOutput.map((vector, token) => vector.map((value, index) => value + embeddings[token][index]));
         // Normalize each shortcut output vector independently before the feed forward network.
-        const normalizedShortcutOutput = shortcutOutput.map((vector) => LayerNormalization.calculate(vector));
+        const normalizedShortcutOutput = shortcutOutput.map((vector) => this.feedForwardLayerNormalization.calculate(vector));
         // The feed forward network processes one token vector at a time.
         const feedForwardOutput = normalizedShortcutOutput.map((vector) => this.feedForward.calculate(vector));
         /*
@@ -101,13 +109,16 @@ class Transformer {
     }
     /**
      * Counts the trainable parameters in the block: those of the multi-head
-     * attention stage plus those of the feed forward network. Layer
-     * normalization, dropout and the shortcut connections have no parameters.
+     * attention stage, the feed forward network and both layer
+     * normalizations. Dropout and the shortcut connections have no parameters.
      *
      * @returns The total number of parameters in the block.
      */
     getParameterCount() {
-        return this.multiHeadAttention.getParameterCount() + this.feedForward.getParameterCount();
+        return (this.multiHeadAttention.getParameterCount() +
+            this.feedForward.getParameterCount() +
+            this.attentionLayerNormalization.getParameterCount() +
+            this.feedForwardLayerNormalization.getParameterCount());
     }
 }
 export default Transformer;

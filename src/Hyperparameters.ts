@@ -16,7 +16,8 @@ class Hyperparameters {
   private readonly _numberAttentionHeads: number;
   private readonly _numberTransformerBlocks: number;
   private readonly _batchSize: number;
-  private readonly _bias: boolean;
+  private readonly _qkvBias: boolean;
+  private readonly _feedForwardBias: boolean;
   private readonly _positionEmbeddingStandardDeviation: number;
 
   /**
@@ -36,8 +37,12 @@ class Hyperparameters {
    * in the model. Must be a positive whole number.
    * @param batchSize - The number of input sequences processed together in
    * one batch. Must be a positive whole number.
-   * @param bias - True if the linear layers of the feed forward network add
-   * a bias to their outputs; false if they do not.
+   * @param qkvBias - True if the query, key and value projections in each
+   * attention head add a bias to their outputs; false if they do not.
+   * Defaults to false, as in the book's GPT-2 configuration.
+   * @param feedForwardBias - True if the linear layers of the feed forward
+   * network add a bias to their outputs; false if they do not. Defaults to
+   * true, as in GPT-2.
    * @param positionEmbeddingStandardDeviation - The standard deviation of the
    * normal distribution (mean 0) used to initialize the position embedding
    * matrix. Defaults to 0.01, the value used by the original GPT-2. Must be
@@ -59,7 +64,8 @@ class Hyperparameters {
     numberAttentionHeads: number = 12,
     numberTransformerBlocks: number = 12,
     batchSize: number = 2,
-    bias: boolean = false,
+    qkvBias: boolean = false,
+    feedForwardBias: boolean = true,
     positionEmbeddingStandardDeviation: number = 0.01
   ) {
     // Written as a negated range check so that NaN, which fails every
@@ -120,7 +126,8 @@ class Hyperparameters {
     this._numberAttentionHeads = numberAttentionHeads;
     this._numberTransformerBlocks = numberTransformerBlocks;
     this._batchSize = batchSize;
-    this._bias = bias;
+    this._qkvBias = qkvBias;
+    this._feedForwardBias = feedForwardBias;
     this._positionEmbeddingStandardDeviation = positionEmbeddingStandardDeviation;
   }
 
@@ -176,11 +183,19 @@ class Hyperparameters {
   }
 
   /**
+   * True if the query, key and value projections in each attention head add
+   * a bias to their outputs; false if they do not.
+   */
+  get qkvBias(): boolean {
+    return this._qkvBias;
+  }
+
+  /**
    * True if the linear layers of the feed forward network add a bias to
    * their outputs; false if they do not.
    */
-  get bias(): boolean {
-    return this._bias;
+  get feedForwardBias(): boolean {
+    return this._feedForwardBias;
   }
 
   /**

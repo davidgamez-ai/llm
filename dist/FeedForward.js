@@ -31,16 +31,16 @@ class FeedForward {
     /** Second linear layer biases built by build(): one per output unit, embeddingSize values. Empty when bias is false. */
     secondLayerBiases = [];
     /**
-     * Creates a FeedForward, copying embeddingSize and bias from the given
-     * Hyperparameters so this instance always matches the values used
-     * elsewhere in the application, then builds the network.
+     * Creates a FeedForward, copying embeddingSize and feedForwardBias from
+     * the given Hyperparameters so this instance always matches the values
+     * used elsewhere in the application, then builds the network.
      *
-     * @param hyperparameters - Source of embeddingSize and bias. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of embeddingSize and feedForwardBias. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.embeddingSize = hyperparameters.embeddingSize;
         this.hiddenSize = 4 * this.embeddingSize;
-        this.bias = hyperparameters.bias;
+        this.bias = hyperparameters.feedForwardBias;
         this.build();
     }
     /**

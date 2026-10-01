@@ -30,19 +30,32 @@ class GPTAttention {
   /** The value weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
   valueWeights: number[][] = [];
 
+  /** True if the query, key and value projections add a bias to their outputs; false if they do not. */
+  qkvBias: boolean;
+
+  /** Query biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
+  queryBiases: number[] = [];
+
+  /** Key biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
+  keyBiases: number[] = [];
+
+  /** Value biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
+  valueBiases: number[] = [];
+
   /**
    * Creates a GPTAttention, copying embeddingSize, weightMatrixColumns,
-   * dropoutRate and training from the given Hyperparameters so this
+   * dropoutRate, training and qkvBias from the given Hyperparameters so this
    * instance always matches the values used elsewhere in the application,
-   * then builds the weight matrices.
+   * then builds the weight matrices and biases.
    *
-   * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate and training. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate, training and qkvBias. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.embeddingSize = hyperparameters.embeddingSize;
     this.weightMatrixColumns = hyperparameters.weightMatrixColumns;
     this.dropoutRate = hyperparameters.dropoutRate;
     this.training = hyperparameters.training;
+    this.qkvBias = hyperparameters.qkvBias;
 
     this.build();
   }
@@ -52,8 +65,11 @@ class GPTAttention {
    * embeddingSize rows by weightMatrixColumns columns, and stores them on the
    * instance. Weights are initialized the same way as PyTorch's nn.Linear:
    * drawn uniformly from [-1/sqrt(embeddingSize), 1/sqrt(embeddingSize)).
+   * When qkvBias is true, a bias vector of weightMatrixColumns values is
+   * also built for each projection, drawn from the same range as nn.Linear
+   * does; otherwise the bias arrays are left empty.
    *
-   * @returns void. The resulting matrices are stored on the instance.
+   * @returns void. The resulting matrices and biases are stored on the instance.
    */
   build(): void {
     /*
@@ -77,6 +93,14 @@ class GPTAttention {
     this.queryWeights = buildMatrix();
     this.keyWeights = buildMatrix();
     this.valueWeights = buildMatrix();
+
+    // A fresh bias vector with the same bound as the weights, as in nn.Linear.
+    const buildBiases = () =>
+      Array.from({ length: this.weightMatrixColumns }, () => (Math.random() * 2 - 1) * bound);
+
+    this.queryBiases = this.qkvBias ? buildBiases() : [];
+    this.keyBiases = this.qkvBias ? buildBiases() : [];
+    this.valueBiases = this.qkvBias ? buildBiases() : [];
 
     if(DEBUG.QKV) console.log(
       `GPTAttention| Weight matrices built. Rows: ${this.embeddingSize}; columns: ${this.weightMatrixColumns}`
@@ -119,13 +143,19 @@ class GPTAttention {
       `GPTAttention| Calculating queries, keys and values for ${embeddings.length} tokens.`
     );
 
-    // Multiplies a single embedding vector by a weight matrix: each column
-    // of the result is the dot product of the vector with that column of
-    // the matrix, so a 1 x embeddingSize vector times an embeddingSize x
-    // weightMatrixColumns matrix produces a 1 x weightMatrixColumns vector.
-    const multiplyVectorByMatrix = (vector: number[], matrix: number[][]): number[] =>
+    /*
+     * Multiplies a single embedding vector by a weight matrix and adds a
+     * bias: each column of the result is the dot product of the vector with
+     * that column of the matrix, plus that column's bias when qkvBias is
+     * true. A 1 x embeddingSize vector times an embeddingSize x
+     * weightMatrixColumns matrix produces a 1 x weightMatrixColumns vector.
+     */
+    const multiplyVectorByMatrix = (vector: number[], matrix: number[][], biases: number[]): number[] =>
       Array.from({ length: this.weightMatrixColumns }, (_, column) =>
-        vector.reduce((sum, value, row) => sum + value * matrix[row][column], 0)
+        vector.reduce(
+          (sum, value, row) => sum + value * matrix[row][column],
+          this.qkvBias ? biases[column] : 0
+        )
       );
 
     const queries: number[][] = [];
@@ -137,9 +167,9 @@ class GPTAttention {
     for (let i = 0; i < embeddings.length; i++) {
       const embedding = embeddings[i];
 
-      const query = multiplyVectorByMatrix(embedding, this.queryWeights);
-      const key = multiplyVectorByMatrix(embedding, this.keyWeights);
-      const value = multiplyVectorByMatrix(embedding, this.valueWeights);
+      const query = multiplyVectorByMatrix(embedding, this.queryWeights, this.queryBiases);
+      const key = multiplyVectorByMatrix(embedding, this.keyWeights, this.keyBiases);
+      const value = multiplyVectorByMatrix(embedding, this.valueWeights, this.valueBiases);
 
       queries.push(query);
       keys.push(key);
@@ -283,7 +313,7 @@ class GPTAttention {
     } else {
       finalAttentionWeights = normalizedMaskedAttentionWeights;
 
-      console.log("GPTAttention| Inference mode: dropout skipped. Final attention weights (after causal mask):");
+      if(DEBUG.ATTENTION) console.log("GPTAttention| Inference mode: dropout skipped. Final attention weights (after causal mask):");
     }
     if(DEBUG.ATTENTION) console.table(finalAttentionWeights);
 
@@ -313,15 +343,19 @@ class GPTAttention {
 
   /**
    * Counts the trainable parameters in this attention head: every value in
-   * the query, key and value weight matrices.
+   * the query, key and value weight matrices, plus their biases. The biases
+   * are empty, and so add nothing, when qkvBias is false.
    *
-   * @returns The total number of weights currently stored in queryWeights, keyWeights and valueWeights.
+   * @returns The total number of weights and biases currently stored on the instance.
    */
   getParameterCount(): number {
     const countMatrix = (matrix: number[][]): number =>
       matrix.reduce((sum, row) => sum + row.length, 0);
 
-    return countMatrix(this.queryWeights) + countMatrix(this.keyWeights) + countMatrix(this.valueWeights);
+    return (
+      countMatrix(this.queryWeights) + countMatrix(this.keyWeights) + countMatrix(this.valueWeights) +
+      this.queryBiases.length + this.keyBiases.length + this.valueBiases.length
+    );
   }
 }
 

@@ -21,6 +21,9 @@ class GPTModel {
   /** The transformer blocks, applied in array order. There are numberTransformerBlocks of them. */
   transformers: Transformer[];
 
+  /** Layer normalization applied to the output of the last transformer block, before the linear output layer. */
+  finalLayerNormalization: LayerNormalization;
+
   /** Maps the final normalized token vectors to a score for every token in the vocabulary. */
   linearOutputLayer: LinearOutputLayer;
 
@@ -32,11 +35,11 @@ class GPTModel {
 
   /**
    * Creates a GPTModel with an Embedding and a LinearOutputLayer, whose
-   * matrices are built immediately, and numberTransformerBlocks Transformer
-   * instances, all built from the same Hyperparameters so their dimensions
-   * match.
+   * matrices are built immediately, numberTransformerBlocks Transformer
+   * instances and a final LayerNormalization, all built from the same
+   * Hyperparameters so their dimensions match.
    *
-   * @param hyperparameters - Source of numberTransformerBlocks, dropoutRate and training, and passed on to Embedding, each Transformer and LinearOutputLayer. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of numberTransformerBlocks, dropoutRate and training, and passed on to Embedding, each Transformer, LayerNormalization and LinearOutputLayer. Defaults to a new Hyperparameters instance.
    * @param seed - Optional seed passed to Embedding.build and LinearOutputLayer.build so their matrices are reproducible. When omitted, they are random on every run.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters(), seed?: number) {
@@ -50,6 +53,8 @@ class GPTModel {
       { length: hyperparameters.numberTransformerBlocks },
       () => new Transformer(hyperparameters)
     );
+
+    this.finalLayerNormalization = new LayerNormalization(hyperparameters);
 
     /*
      * The output layer's weight matrix has the same dimensions as the
@@ -98,7 +103,7 @@ class GPTModel {
     }
 
     // Final layer normalization, applied to each token vector independently, as in GPT-2.
-    const normalizedOutput = transformerOutput.map((vector) => LayerNormalization.calculate(vector));
+    const normalizedOutput = transformerOutput.map((vector) => this.finalLayerNormalization.calculate(vector));
 
     if (DEBUG.GPT_MODEL) {
       console.log("GPTModel| Output of final layer normalization (one row per token):");
@@ -111,8 +116,8 @@ class GPTModel {
 
   /**
    * Counts the trainable parameters in the whole model: the embedding, every
-   * transformer block and the linear output layer. Dropout and the final
-   * layer normalization have no parameters.
+   * transformer block, the final layer normalization and the linear output
+   * layer. Dropout has no parameters.
    *
    * @returns The total number of parameters in the model.
    */
@@ -120,6 +125,7 @@ class GPTModel {
     return (
       this.embedding.getParameterCount() +
       this.transformers.reduce((sum, transformer) => sum + transformer.getParameterCount(), 0) +
+      this.finalLayerNormalization.getParameterCount() +
       this.linearOutputLayer.getParameterCount()
     );
   }

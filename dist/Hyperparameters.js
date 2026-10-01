@@ -15,7 +15,8 @@ class Hyperparameters {
     _numberAttentionHeads;
     _numberTransformerBlocks;
     _batchSize;
-    _bias;
+    _qkvBias;
+    _feedForwardBias;
     _positionEmbeddingStandardDeviation;
     /**
      * Creates a Hyperparameters instance.
@@ -34,8 +35,12 @@ class Hyperparameters {
      * in the model. Must be a positive whole number.
      * @param batchSize - The number of input sequences processed together in
      * one batch. Must be a positive whole number.
-     * @param bias - True if the linear layers of the feed forward network add
-     * a bias to their outputs; false if they do not.
+     * @param qkvBias - True if the query, key and value projections in each
+     * attention head add a bias to their outputs; false if they do not.
+     * Defaults to false, as in the book's GPT-2 configuration.
+     * @param feedForwardBias - True if the linear layers of the feed forward
+     * network add a bias to their outputs; false if they do not. Defaults to
+     * true, as in GPT-2.
      * @param positionEmbeddingStandardDeviation - The standard deviation of the
      * normal distribution (mean 0) used to initialize the position embedding
      * matrix. Defaults to 0.01, the value used by the original GPT-2. Must be
@@ -49,7 +54,7 @@ class Hyperparameters {
      * @throws RangeError if positionEmbeddingStandardDeviation is negative,
      * infinite or NaN.
      */
-    constructor(embeddingSize = 768, contextLength = 1024, dropoutRate = 0.1, training = true, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, bias = false, positionEmbeddingStandardDeviation = 0.01) {
+    constructor(embeddingSize = 768, contextLength = 1024, dropoutRate = 0.1, training = true, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = false, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01) {
         // Written as a negated range check so that NaN, which fails every
         // comparison, is rejected along with values outside [0, 1].
         if (!(dropoutRate >= 0 && dropoutRate <= 1)) {
@@ -92,7 +97,8 @@ class Hyperparameters {
         this._numberAttentionHeads = numberAttentionHeads;
         this._numberTransformerBlocks = numberTransformerBlocks;
         this._batchSize = batchSize;
-        this._bias = bias;
+        this._qkvBias = qkvBias;
+        this._feedForwardBias = feedForwardBias;
         this._positionEmbeddingStandardDeviation = positionEmbeddingStandardDeviation;
     }
     /** The size of each token embedding vector. */
@@ -139,11 +145,18 @@ class Hyperparameters {
         return this._batchSize;
     }
     /**
+     * True if the query, key and value projections in each attention head add
+     * a bias to their outputs; false if they do not.
+     */
+    get qkvBias() {
+        return this._qkvBias;
+    }
+    /**
      * True if the linear layers of the feed forward network add a bias to
      * their outputs; false if they do not.
      */
-    get bias() {
-        return this._bias;
+    get feedForwardBias() {
+        return this._feedForwardBias;
     }
     /**
      * The standard deviation of the normal distribution (mean 0) used to

@@ -20,7 +20,8 @@ const hyperparameters = new Hyperparameters(
     12,
     12,
      2,
-    false
+    false,
+    true
 );
 
 //New GPT model
