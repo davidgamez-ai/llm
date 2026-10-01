@@ -87,6 +87,17 @@ class MultiHeadAttention {
 
     return contextVectors;
   }
+
+  /**
+   * Counts the trainable parameters across all attention heads. The
+   * concatenation itself has no parameters, so this is the sum of each
+   * head's own parameter count.
+   *
+   * @returns The total number of parameters in every GPTAttention head.
+   */
+  getParameterCount(): number {
+    return this.attentionHeads.reduce((sum, head) => sum + head.getParameterCount(), 0);
+  }
 }
 
 export default MultiHeadAttention;

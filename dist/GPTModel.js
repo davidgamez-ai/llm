@@ -87,5 +87,17 @@ class GPTModel {
         // Logits for every token in training mode; probabilities for the next token in inference mode.
         return this.linearOutputLayer.calculate(normalizedOutput);
     }
+    /**
+     * Counts the trainable parameters in the whole model: the embedding, every
+     * transformer block and the linear output layer. Dropout and the final
+     * layer normalization have no parameters.
+     *
+     * @returns The total number of parameters in the model.
+     */
+    getParameterCount() {
+        return (this.embedding.getParameterCount() +
+            this.transformers.reduce((sum, transformer) => sum + transformer.getParameterCount(), 0) +
+            this.linearOutputLayer.getParameterCount());
+    }
 }
 export default GPTModel;

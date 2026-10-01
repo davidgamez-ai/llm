@@ -99,5 +99,15 @@ class Transformer {
         }
         return output;
     }
+    /**
+     * Counts the trainable parameters in the block: those of the multi-head
+     * attention stage plus those of the feed forward network. Layer
+     * normalization, dropout and the shortcut connections have no parameters.
+     *
+     * @returns The total number of parameters in the block.
+     */
+    getParameterCount() {
+        return this.multiHeadAttention.getParameterCount() + this.feedForward.getParameterCount();
+    }
 }
 export default Transformer;

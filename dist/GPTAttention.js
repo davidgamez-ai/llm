@@ -254,5 +254,15 @@ class GPTAttention {
         }
         return contextVectors;
     }
+    /**
+     * Counts the trainable parameters in this attention head: every value in
+     * the query, key and value weight matrices.
+     *
+     * @returns The total number of weights currently stored in queryWeights, keyWeights and valueWeights.
+     */
+    getParameterCount() {
+        const countMatrix = (matrix) => matrix.reduce((sum, row) => sum + row.length, 0);
+        return countMatrix(this.queryWeights) + countMatrix(this.keyWeights) + countMatrix(this.valueWeights);
+    }
 }
 export default GPTAttention;

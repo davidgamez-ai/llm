@@ -127,6 +127,21 @@ class Embedding {
   }
 
   /**
+   * Counts the trainable parameters in the embedding: every value in the
+   * token embedding matrix and the position embedding matrix. Returns 0
+   * until build() has been called.
+   *
+   * @returns The total number of values currently stored in textEmbeddingMatrix and positionEmbeddingMatrix.
+   */
+  getParameterCount(): number {
+    const countMatrix = (matrix: number[][]): number =>
+      matrix.reduce((sum, row) => sum + row.length, 0);
+
+    return countMatrix(this.textEmbeddingMatrix) 
+    + countMatrix(this.positionEmbeddingMatrix);
+  }
+
+  /**
    * Logs a one or two dimensional array. When DEBUG.VERBOSE is true the
    * whole array is printed with console.table; otherwise only its
    * dimensions are printed, which keeps the output short for large arrays.

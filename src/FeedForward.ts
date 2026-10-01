@@ -144,6 +144,25 @@ class FeedForward {
 
     return output;
   }
+
+  /**
+   * Counts the trainable parameters in the network: the weights of both
+   * linear layers plus their biases. The biases are empty, and so add
+   * nothing, when bias is false.
+   *
+   * @returns The total number of weights and biases currently stored on the instance.
+   */
+  getParameterCount(): number {
+    const countMatrix = (matrix: number[][]): number =>
+      matrix.reduce((sum, row) => sum + row.length, 0);
+
+    return (
+      countMatrix(this.firstLayerWeights) +
+      this.firstLayerBiases.length +
+      countMatrix(this.secondLayerWeights) +
+      this.secondLayerBiases.length
+    );
+  }
 }
 
 export default FeedForward;

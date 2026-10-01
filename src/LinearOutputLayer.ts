@@ -114,6 +114,16 @@ class LinearOutputLayer {
 
     return output;
   }
+
+  /**
+   * Counts the trainable parameters in the layer: every value in the weight
+   * matrix. Returns 0 until build() has been called.
+   *
+   * @returns The total number of weights currently stored in weights.
+   */
+  getParameterCount(): number {
+    return this.weights.reduce((sum, row) => sum + row.length, 0);
+  }
 }
 
 export default LinearOutputLayer;
