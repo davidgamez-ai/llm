@@ -42,13 +42,16 @@ class GPTAttention {
   /** Value biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
   valueBiases: number[] = [];
 
+  /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
+  private readonly random: () => number;
+
   /**
    * Creates a GPTAttention, copying embeddingSize, weightMatrixColumns,
    * dropoutRate, training and qkvBias from the given Hyperparameters so this
    * instance always matches the values used elsewhere in the application,
    * then builds the weight matrices and biases.
    *
-   * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate, training and qkvBias. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate, training, qkvBias and the random number stream. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.embeddingSize = hyperparameters.embeddingSize;
@@ -56,6 +59,7 @@ class GPTAttention {
     this.dropoutRate = hyperparameters.dropoutRate;
     this.training = hyperparameters.training;
     this.qkvBias = hyperparameters.qkvBias;
+    this.random = () => hyperparameters.random();
 
     this.build();
   }
@@ -87,7 +91,7 @@ class GPTAttention {
     // independent set of random values.
     const buildMatrix = () =>
       Array.from({ length: this.embeddingSize }, () =>
-        Array.from({ length: this.weightMatrixColumns }, () => (Math.random() * 2 - 1) * bound)
+        Array.from({ length: this.weightMatrixColumns }, () => (this.random() * 2 - 1) * bound)
       );
 
     this.queryWeights = buildMatrix();
@@ -96,7 +100,7 @@ class GPTAttention {
 
     // A fresh bias vector with the same bound as the weights, as in nn.Linear.
     const buildBiases = () =>
-      Array.from({ length: this.weightMatrixColumns }, () => (Math.random() * 2 - 1) * bound);
+      Array.from({ length: this.weightMatrixColumns }, () => (this.random() * 2 - 1) * bound);
 
     this.queryBiases = this.qkvBias ? buildBiases() : [];
     this.keyBiases = this.qkvBias ? buildBiases() : [];
@@ -293,7 +297,7 @@ class GPTAttention {
        */
       const keepScale = 1 / (1 - this.dropoutRate);
       const dropoutMask: number[][] = normalizedMaskedAttentionWeights.map((row) =>
-        row.map(() => (Math.random() < this.dropoutRate ? 0 : keepScale))
+        row.map(() => (this.random() < this.dropoutRate ? 0 : keepScale))
       );
       if(DEBUG.ATTENTION) {
         console.log(`GPTAttention| Dropout mask (dropout rate ${this.dropoutRate}; kept values = ${keepScale}):`);

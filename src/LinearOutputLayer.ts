@@ -1,6 +1,5 @@
 import Hyperparameters from "./Hyperparameters.js";
 import DEBUG from "./Debug.js";
-import createSeededRandom from "./SeededRandom.js";
 
 /**
  * The linear output layer of the GPT model. It holds a weight matrix with
@@ -23,34 +22,37 @@ class LinearOutputLayer {
   /** The weight matrix built by build(): vocabSize rows by embeddingSize columns. */
   weights: number[][] = [];
 
+  /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
+  private readonly random: () => number;
+
   /**
    * Creates a LinearOutputLayer, copying vocabSize, embeddingSize and
    * training from the given Hyperparameters so this instance always matches
    * the values used elsewhere in the application.
    *
-   * @param hyperparameters - Source of vocabularySize, embeddingSize and training. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of vocabularySize, embeddingSize, training and the random number stream. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.vocabSize = hyperparameters.vocabularySize;
     this.embeddingSize = hyperparameters.embeddingSize;
     this.training = hyperparameters.training;
+    this.random = () => hyperparameters.random();
   }
 
   /**
    * Builds the vocabSize x embeddingSize weight matrix, filled with values
    * drawn uniformly from [min, max), and stores it on the instance. Uses the
-   * same initialization as Embedding.build.
+   * same initialization as Embedding.build. Random values come from the
+   * Hyperparameters' shared stream, so the matrix is reproducible when
+   * Hyperparameters.seed is set.
    *
-   * @param seed - Optional PRNG seed. When provided, the same seed always produces the same matrix. When omitted, Math.random() is used and the matrix differs on every call.
    * @param min - Inclusive lower bound of the random range. Defaults to -3.
    * @param max - Exclusive upper bound of the random range. Defaults to 3.
    * @returns void. The resulting matrix is stored on the instance.
    */
-  build(seed?: number, min: number = -3, max: number = 3): void {
-    const random = seed === undefined ? Math.random : createSeededRandom(seed);
-
+  build(min: number = -3, max: number = 3): void {
     this.weights = Array.from({ length: this.vocabSize }, () =>
-      Array.from({ length: this.embeddingSize }, () => min + random() * (max - min))
+      Array.from({ length: this.embeddingSize }, () => min + this.random() * (max - min))
     );
 
     if (DEBUG.LINEAR_OUTPUT_LAYER) console.log(

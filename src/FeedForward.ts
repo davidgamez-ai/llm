@@ -38,17 +38,21 @@ class FeedForward {
   /** Second linear layer biases built by build(): one per output unit, embeddingSize values. Empty when bias is false. */
   secondLayerBiases: number[] = [];
 
+  /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
+  private readonly random: () => number;
+
   /**
    * Creates a FeedForward, copying embeddingSize and feedForwardBias from
    * the given Hyperparameters so this instance always matches the values
    * used elsewhere in the application, then builds the network.
    *
-   * @param hyperparameters - Source of embeddingSize and feedForwardBias. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of embeddingSize, feedForwardBias and the random number stream. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.embeddingSize = hyperparameters.embeddingSize;
     this.hiddenSize = 4 * this.embeddingSize;
     this.bias = hyperparameters.feedForwardBias;
+    this.random = () => hyperparameters.random();
 
     this.build();
   }
@@ -76,14 +80,14 @@ class FeedForward {
     const buildMatrix = (rows: number, columns: number): number[][] => {
       const bound = 1 / Math.sqrt(rows);
       return Array.from({ length: rows }, () =>
-        Array.from({ length: columns }, () => (Math.random() * 2 - 1) * bound)
+        Array.from({ length: columns }, () => (this.random() * 2 - 1) * bound)
       );
     };
 
     // A bias vector with the same bound as the matching weight matrix, as in nn.Linear.
     const buildBiases = (fanIn: number, length: number): number[] => {
       const bound = 1 / Math.sqrt(fanIn);
-      return Array.from({ length }, () => (Math.random() * 2 - 1) * bound);
+      return Array.from({ length }, () => (this.random() * 2 - 1) * bound);
     };
 
     this.firstLayerWeights = buildMatrix(this.embeddingSize, this.hiddenSize);

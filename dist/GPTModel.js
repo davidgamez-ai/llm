@@ -26,30 +26,34 @@ class GPTModel {
     dropoutRate;
     /** True in training mode, when dropout is applied to the embeddings; false in inference mode, when it is skipped. */
     training;
+    /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
+    random;
     /**
      * Creates a GPTModel with an Embedding and a LinearOutputLayer, whose
      * matrices are built immediately, numberTransformerBlocks Transformer
      * instances and a final LayerNormalization, all built from the same
-     * Hyperparameters so their dimensions match.
+     * Hyperparameters so their dimensions match. Every component draws its
+     * random values from the Hyperparameters' shared stream, so the whole
+     * model is reproducible when Hyperparameters.seed is set.
      *
-     * @param hyperparameters - Source of numberTransformerBlocks, dropoutRate and training, and passed on to Embedding, each Transformer, LayerNormalization and LinearOutputLayer. Defaults to a new Hyperparameters instance.
-     * @param seed - Optional seed passed to Embedding.build and LinearOutputLayer.build so their matrices are reproducible. When omitted, they are random on every run.
+     * @param hyperparameters - Source of numberTransformerBlocks, dropoutRate, training and the random number stream, and passed on to Embedding, each Transformer, LayerNormalization and LinearOutputLayer. Defaults to a new Hyperparameters instance.
      */
-    constructor(hyperparameters = new Hyperparameters(), seed) {
+    constructor(hyperparameters = new Hyperparameters()) {
         this.dropoutRate = hyperparameters.dropoutRate;
         this.training = hyperparameters.training;
+        this.random = () => hyperparameters.random();
         this.embedding = new Embedding(hyperparameters);
-        this.embedding.build(seed);
+        this.embedding.build();
         this.transformers = Array.from({ length: hyperparameters.numberTransformerBlocks }, () => new Transformer(hyperparameters));
         this.finalLayerNormalization = new LayerNormalization(hyperparameters);
         /*
          * The output layer's weight matrix has the same dimensions as the
-         * embedding's token matrix and is built the same way, so the same seed
-         * would make the two matrices identical. Offsetting the seed keeps them
-         * reproducible but independent.
+         * embedding's token matrix and is built the same way. Both draw from
+         * the same shared stream, at different points in it, so the two
+         * matrices are independent rather than identical.
          */
         this.linearOutputLayer = new LinearOutputLayer(hyperparameters);
-        this.linearOutputLayer.build(seed === undefined ? undefined : seed + 1);
+        this.linearOutputLayer.build();
     }
     /**
      * Runs tokenized text through the model: embedding, dropout on the
@@ -70,7 +74,7 @@ class GPTModel {
         let droppedEmbeddings = embeddings;
         if (this.training) {
             const keepScale = 1 / (1 - this.dropoutRate);
-            droppedEmbeddings = embeddings.map((vector) => vector.map((value) => (Math.random() < this.dropoutRate ? 0 : value * keepScale)));
+            droppedEmbeddings = embeddings.map((vector) => vector.map((value) => (this.random() < this.dropoutRate ? 0 : value * keepScale)));
             if (DEBUG.GPT_MODEL) {
                 console.log(`GPTModel| Embeddings after dropout (dropout rate ${this.dropoutRate}):`);
                 console.table(droppedEmbeddings);

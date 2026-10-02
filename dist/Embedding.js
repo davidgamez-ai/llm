@@ -1,7 +1,6 @@
 import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
 import DEBUG from "./Debug.js";
-import createSeededRandom from "./SeededRandom.js";
 /**
  * Two embedding matrices, each mapping an id (a token id, or a sequence
  * position) to a vector of embeddingSize random values. The token embedding
@@ -30,19 +29,22 @@ class Embedding {
     // the context window (contextLength rows), each row embeddingSize values
     // wide. Looked up by a token's position in the sequence rather than by its id.
     positionEmbeddingMatrix = [];
+    /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
+    random;
     /**
      * Creates an Embedding, copying vocabSize, contextLength, embeddingSize
      * and positionEmbeddingStandardDeviation from the given Hyperparameters so
      * this instance always matches the values used elsewhere in the
      * application.
      *
-     * @param hyperparameters - Source of vocabularySize, contextLength, embeddingSize and positionEmbeddingStandardDeviation. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of vocabularySize, contextLength, embeddingSize, positionEmbeddingStandardDeviation and the random number stream. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.vocabSize = hyperparameters.vocabularySize;
         this.contextLength = hyperparameters.contextLength;
         this.embeddingSize = hyperparameters.embeddingSize;
         this.positionEmbeddingStandardDeviation = hyperparameters.positionEmbeddingStandardDeviation;
+        this.random = () => hyperparameters.random();
     }
     /**
      * Builds the two embedding matrices, stores them on the instance, and logs
@@ -53,13 +55,15 @@ class Embedding {
      *   in GPT-2, with values drawn from a normal distribution with mean 0 and
      *   standard deviation positionEmbeddingStandardDeviation (0.01 by default).
      *
-     * @param seed - Optional PRNG seed. When provided, the same seed always produces the same matrices, since Math.random() cannot be seeded and would otherwise make results unreproducible between runs. When omitted, Math.random() is used and the matrices differ on every call.
+     * Random values come from the Hyperparameters' shared stream, so the
+     * matrices are reproducible when Hyperparameters.seed is set.
+     *
      * @param min - Inclusive lower bound of the token embedding random range. Defaults to -3.
      * @param max - Exclusive upper bound of the token embedding random range. Defaults to 3.
      * @returns void. The resulting matrices are stored on the instance for use by getEmbedding.
      */
-    build(seed, min = -3, max = 3) {
-        const random = seed === undefined ? Math.random : createSeededRandom(seed);
+    build(min = -3, max = 3) {
+        const random = this.random;
         /*
          * Draws one sample from a normal distribution with mean 0 and the given
          * standard deviation, using the Box-Muller transform to turn two uniform

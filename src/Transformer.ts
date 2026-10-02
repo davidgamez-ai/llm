@@ -38,6 +38,9 @@ class Transformer {
   /** True in training mode, when dropout is applied to the feed forward output; false in inference mode, when it is skipped. */
   training: boolean;
 
+  /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
+  private readonly random: () => number;
+
   /**
    * Creates a Transformer with its own MultiHeadAttention, FeedForward and
    * two LayerNormalization instances, all built from the same
@@ -45,11 +48,12 @@ class Transformer {
    * training from them. Each layer normalization has its own trainable
    * scale and shift, so the two are separate instances.
    *
-   * @param hyperparameters - Source of dropoutRate and training, and passed on to MultiHeadAttention, FeedForward and LayerNormalization. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of dropoutRate, training and the random number stream, and passed on to MultiHeadAttention, FeedForward and LayerNormalization. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.dropoutRate = hyperparameters.dropoutRate;
     this.training = hyperparameters.training;
+    this.random = () => hyperparameters.random();
     this.multiHeadAttention = new MultiHeadAttention(hyperparameters);
     this.feedForward = new FeedForward(hyperparameters);
     this.attentionLayerNormalization = new LayerNormalization(hyperparameters);
@@ -103,7 +107,7 @@ class Transformer {
     if (this.training) {
       const keepScale = 1 / (1 - this.dropoutRate);
       droppedFeedForwardOutput = feedForwardOutput.map((vector) =>
-        vector.map((value) => (Math.random() < this.dropoutRate ? 0 : value * keepScale))
+        vector.map((value) => (this.random() < this.dropoutRate ? 0 : value * keepScale))
       );
 
       if (DEBUG.TRANSFORMER) {

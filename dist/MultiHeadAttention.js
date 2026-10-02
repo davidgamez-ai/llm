@@ -21,17 +21,20 @@ class MultiHeadAttention {
     outputProjectionWeights = [];
     /** Output projection biases built by build(): embeddingSize values. */
     outputProjectionBiases = [];
+    /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
+    random;
     /**
      * Creates a MultiHeadAttention with numberAttentionHeads GPTAttention
      * heads, each built from the same Hyperparameters so they all share the
      * same dimensions, dropout rate and training mode, then builds the
      * output projection.
      *
-     * @param hyperparameters - Source of numberAttentionHeads, embeddingSize and numberTransformerBlocks, and passed on to each GPTAttention head. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of numberAttentionHeads, embeddingSize, numberTransformerBlocks and the random number stream, and passed on to each GPTAttention head. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.embeddingSize = hyperparameters.embeddingSize;
         this.numberTransformerBlocks = hyperparameters.numberTransformerBlocks;
+        this.random = () => hyperparameters.random();
         this.attentionHeads = Array.from({ length: hyperparameters.numberAttentionHeads }, () => new GPTAttention(hyperparameters));
         if (DEBUG.ATTENTION)
             console.log(`MultiHeadAttention| Created ${this.attentionHeads.length} attention heads.`);
@@ -59,12 +62,12 @@ class MultiHeadAttention {
         /*
          * Draws one sample from a normal distribution with mean 0 and the given
          * standard deviation, using the Box-Muller transform to turn two uniform
-         * samples into a standard normal sample. 1 - Math.random() lies in
-         * (0, 1], so Math.log never receives 0.
+         * samples into a standard normal sample. 1 - random() lies in (0, 1],
+         * so Math.log never receives 0.
          */
         const randomNormal = (deviation) => {
-            const u1 = 1 - Math.random();
-            const u2 = Math.random();
+            const u1 = 1 - this.random();
+            const u2 = this.random();
             return deviation * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
         };
         this.outputProjectionWeights = Array.from({ length: this.embeddingSize }, () => Array.from({ length: this.embeddingSize }, () => randomNormal(standardDeviation)));
