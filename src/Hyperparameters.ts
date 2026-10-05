@@ -26,6 +26,10 @@ class Hyperparameters {
   private _qkvBias: boolean;
   private _feedForwardBias: boolean;
   private _positionEmbeddingStandardDeviation: number;
+  private _tokenEmbeddingStandardDeviation: number;
+  private _attentionProjectionStandardDeviation: number;
+  private _outputLayerStandardDeviation: number;
+  private _outputLength: number;
   private _seed: number | undefined;
 
   /**
@@ -63,6 +67,21 @@ class Hyperparameters {
    * normal distribution (mean 0) used to initialize the position embedding
    * matrix. Defaults to 0.01, the value used by the original GPT-2. Must be
    * a finite number greater than or equal to 0.
+   * @param tokenEmbeddingStandardDeviation - The standard deviation of the
+   * normal distribution (mean 0) used to initialize the token embedding
+   * matrix. Defaults to 0.02, as in GPT-2. Must be a finite number greater
+   * than or equal to 0.
+   * @param attentionProjectionStandardDeviation - The base standard deviation
+   * of the normal distribution (mean 0) used to initialize the multi-head
+   * attention output projection, before it is divided by
+   * sqrt(2 * numberTransformerBlocks). Defaults to 0.02, as in GPT-2. Must be
+   * a finite number greater than or equal to 0.
+   * @param outputLayerStandardDeviation - The standard deviation of the
+   * normal distribution (mean 0) used to initialize the linear output
+   * layer's weight matrix. Defaults to 0.02, as in GPT-2. Must be a finite
+   * number greater than or equal to 0.
+   * @param outputLength - The number of tokens the model should generate.
+   * Defaults to 2. Must be a positive whole number.
    * @param seed - Optional PRNG seed for the random number stream returned
    * by random(), which every component uses for weight initialization,
    * dropout and decoding. When provided, the same seed always produces the
@@ -75,12 +94,14 @@ class Hyperparameters {
    * not a whole number.
    * @throws RangeError if numberTransformerBlocks is not a positive whole number.
    * @throws RangeError if batchSize is not a positive whole number.
-   * @throws RangeError if positionEmbeddingStandardDeviation is negative,
-   * infinite or NaN.
+   * @throws RangeError if positionEmbeddingStandardDeviation,
+   * tokenEmbeddingStandardDeviation, attentionProjectionStandardDeviation or
+   * outputLayerStandardDeviation is negative, infinite or NaN.
+   * @throws RangeError if outputLength is not a positive whole number.
    */
   constructor(
     embeddingSize: number = 768,
-    contextLength: number = 1024,
+    contextLength: number = 12,//GPT-2 uses 1024
     dropoutRate: number = 0.1,
     training: boolean = true,
     numberAttentionHeads: number = 12,
@@ -89,6 +110,10 @@ class Hyperparameters {
     qkvBias: boolean = false,
     feedForwardBias: boolean = true,
     positionEmbeddingStandardDeviation: number = 0.01,
+    tokenEmbeddingStandardDeviation: number = 0.02,
+    attentionProjectionStandardDeviation: number = 0.02,
+    outputLayerStandardDeviation: number = 0.02,
+    outputLength: number = 2,
     seed?: number
   ) {
     Hyperparameters.validateDropoutRate(dropoutRate);
@@ -96,7 +121,11 @@ class Hyperparameters {
     const weightMatrixColumns = Hyperparameters.computeWeightMatrixColumns(embeddingSize, numberAttentionHeads);
     Hyperparameters.validatePositiveInteger("numberTransformerBlocks", numberTransformerBlocks);
     Hyperparameters.validatePositiveInteger("batchSize", batchSize);
-    Hyperparameters.validatePositionEmbeddingStandardDeviation(positionEmbeddingStandardDeviation);
+    Hyperparameters.validateStandardDeviation("positionEmbeddingStandardDeviation", positionEmbeddingStandardDeviation);
+    Hyperparameters.validateStandardDeviation("tokenEmbeddingStandardDeviation", tokenEmbeddingStandardDeviation);
+    Hyperparameters.validateStandardDeviation("attentionProjectionStandardDeviation", attentionProjectionStandardDeviation);
+    Hyperparameters.validateStandardDeviation("outputLayerStandardDeviation", outputLayerStandardDeviation);
+    Hyperparameters.validatePositiveInteger("outputLength", outputLength);
 
     this._embeddingSize = embeddingSize;
     this._contextLength = contextLength;
@@ -110,6 +139,10 @@ class Hyperparameters {
     this._qkvBias = qkvBias;
     this._feedForwardBias = feedForwardBias;
     this._positionEmbeddingStandardDeviation = positionEmbeddingStandardDeviation;
+    this._tokenEmbeddingStandardDeviation = tokenEmbeddingStandardDeviation;
+    this._attentionProjectionStandardDeviation = attentionProjectionStandardDeviation;
+    this._outputLayerStandardDeviation = outputLayerStandardDeviation;
+    this._outputLength = outputLength;
     this._seed = seed;
     this._random = Hyperparameters.createRandom(seed);
   }
@@ -180,19 +213,17 @@ class Hyperparameters {
   }
 
   /**
-   * Checks that a position embedding standard deviation is a finite number
-   * greater than or equal to 0.
+   * Checks that a weight initialization standard deviation is a finite
+   * number greater than or equal to 0.
    *
+   * @param name - The name of the hyperparameter, used in the error message.
    * @param standardDeviation - The standard deviation to check.
    * @throws RangeError if standardDeviation is negative, infinite or NaN.
    */
-  private static validatePositionEmbeddingStandardDeviation(standardDeviation: number): void {
+  private static validateStandardDeviation(name: string, standardDeviation: number): void {
     // Number.isFinite rejects NaN and Infinity; a negative standard deviation is meaningless.
     if (!(Number.isFinite(standardDeviation) && standardDeviation >= 0)) {
-      throw new RangeError(
-        `Hyperparameters| positionEmbeddingStandardDeviation must be a finite number >= 0; ` +
-        `got ${standardDeviation}`
-      );
+      throw new RangeError(`Hyperparameters| ${name} must be a finite number >= 0; got ${standardDeviation}`);
     }
   }
 
@@ -331,8 +362,63 @@ class Hyperparameters {
 
   /** @throws RangeError if positionEmbeddingStandardDeviation is negative, infinite or NaN. */
   set positionEmbeddingStandardDeviation(positionEmbeddingStandardDeviation: number) {
-    Hyperparameters.validatePositionEmbeddingStandardDeviation(positionEmbeddingStandardDeviation);
+    Hyperparameters.validateStandardDeviation("positionEmbeddingStandardDeviation", positionEmbeddingStandardDeviation);
     this._positionEmbeddingStandardDeviation = positionEmbeddingStandardDeviation;
+  }
+
+  /**
+   * The standard deviation of the normal distribution (mean 0) used to
+   * initialize the token embedding matrix. GPT-2 uses 0.02.
+   */
+  get tokenEmbeddingStandardDeviation(): number {
+    return this._tokenEmbeddingStandardDeviation;
+  }
+
+  /** @throws RangeError if tokenEmbeddingStandardDeviation is negative, infinite or NaN. */
+  set tokenEmbeddingStandardDeviation(tokenEmbeddingStandardDeviation: number) {
+    Hyperparameters.validateStandardDeviation("tokenEmbeddingStandardDeviation", tokenEmbeddingStandardDeviation);
+    this._tokenEmbeddingStandardDeviation = tokenEmbeddingStandardDeviation;
+  }
+
+  /**
+   * The base standard deviation of the normal distribution (mean 0) used to
+   * initialize the multi-head attention output projection. GPT-2 uses 0.02.
+   * MultiHeadAttention divides it by sqrt(2 * numberTransformerBlocks) to
+   * stop the residual stream's variance growing with the model's depth.
+   */
+  get attentionProjectionStandardDeviation(): number {
+    return this._attentionProjectionStandardDeviation;
+  }
+
+  /** @throws RangeError if attentionProjectionStandardDeviation is negative, infinite or NaN. */
+  set attentionProjectionStandardDeviation(attentionProjectionStandardDeviation: number) {
+    Hyperparameters.validateStandardDeviation("attentionProjectionStandardDeviation", attentionProjectionStandardDeviation);
+    this._attentionProjectionStandardDeviation = attentionProjectionStandardDeviation;
+  }
+
+  /**
+   * The standard deviation of the normal distribution (mean 0) used to
+   * initialize the linear output layer's weight matrix. GPT-2 uses 0.02.
+   */
+  get outputLayerStandardDeviation(): number {
+    return this._outputLayerStandardDeviation;
+  }
+
+  /** @throws RangeError if outputLayerStandardDeviation is negative, infinite or NaN. */
+  set outputLayerStandardDeviation(outputLayerStandardDeviation: number) {
+    Hyperparameters.validateStandardDeviation("outputLayerStandardDeviation", outputLayerStandardDeviation);
+    this._outputLayerStandardDeviation = outputLayerStandardDeviation;
+  }
+
+  /** The number of tokens the model should generate. */
+  get outputLength(): number {
+    return this._outputLength;
+  }
+
+  /** @throws RangeError if outputLength is not a positive whole number. */
+  set outputLength(outputLength: number) {
+    Hyperparameters.validatePositiveInteger("outputLength", outputLength);
+    this._outputLength = outputLength;
   }
 
   /**

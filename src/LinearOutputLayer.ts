@@ -16,8 +16,21 @@ class LinearOutputLayer {
   /** Number of columns in the weight matrix, i.e. the width of each token vector. */
   embeddingSize: number;
 
-  /** True in training mode, when logits are calculated for every token; false in inference mode, when they are only calculated for the last token. */
-  training: boolean;
+  /**
+   * True in training mode, when logits are calculated for every token; false
+   * in inference mode, when they are only calculated for the last token.
+   * Read from Hyperparameters on every access, so changing
+   * Hyperparameters.training after construction takes effect.
+   */
+  get training(): boolean {
+    return this.isTraining();
+  }
+
+  /** Reads the Hyperparameters' current training flag. */
+  private readonly isTraining: () => boolean;
+
+  /** Standard deviation of the normal distribution (mean 0) used to initialize the weight matrix. GPT-2 uses 0.02. */
+  standardDeviation: number;
 
   /** The weight matrix built by build(): vocabSize rows by embeddingSize columns. */
   weights: number[][] = [];
@@ -27,32 +40,52 @@ class LinearOutputLayer {
 
   /**
    * Creates a LinearOutputLayer, copying vocabSize, embeddingSize and
-   * training from the given Hyperparameters so this instance always matches
-   * the values used elsewhere in the application.
+   * outputLayerStandardDeviation from the given Hyperparameters so this
+   * instance always matches the values used elsewhere in the application.
    *
-   * @param hyperparameters - Source of vocabularySize, embeddingSize, training and the random number stream. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of vocabularySize, embeddingSize, outputLayerStandardDeviation, training and the random number stream. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.vocabSize = hyperparameters.vocabularySize;
     this.embeddingSize = hyperparameters.embeddingSize;
-    this.training = hyperparameters.training;
+    this.standardDeviation = hyperparameters.outputLayerStandardDeviation;
+    this.isTraining = () => hyperparameters.training;
     this.random = () => hyperparameters.random();
   }
 
   /**
-   * Builds the vocabSize x embeddingSize weight matrix, filled with values
-   * drawn uniformly from [min, max), and stores it on the instance. Uses the
-   * same initialization as Embedding.build. Random values come from the
-   * Hyperparameters' shared stream, so the matrix is reproducible when
+   * Builds the vocabSize x embeddingSize weight matrix and stores it on the
+   * instance. Initialized as in GPT-2 (Hugging Face GPT2Model._init_weights),
+   * with values drawn from a normal distribution with mean 0 and standard
+   * deviation standardDeviation (0.02 by default). Random values come from
+   * the Hyperparameters' shared stream, so the matrix is reproducible when
    * Hyperparameters.seed is set.
    *
-   * @param min - Inclusive lower bound of the random range. Defaults to -3.
-   * @param max - Exclusive upper bound of the random range. Defaults to 3.
    * @returns void. The resulting matrix is stored on the instance.
    */
-  build(min: number = -3, max: number = 3): void {
+  build(): void {
+    /*
+     * Draws one sample from a normal distribution with mean 0 and the given
+     * standard deviation, using the Box-Muller transform to turn two uniform
+     * samples into a standard normal sample. 1 - random() lies in (0, 1],
+     * so Math.log never receives 0.
+     */
+    const randomNormal = (deviation: number): number => {
+      const u1 = 1 - this.random();
+      const u2 = this.random();
+      return deviation * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    };
+
+    /*
+     * A small standard deviation keeps the initial logits close together:
+     * each logit is a dot product of embeddingSize terms with a normalized
+     * vector, so its standard deviation is about
+     * standardDeviation * sqrt(embeddingSize), roughly 0.55 for 0.02 and 768.
+     * The untrained model therefore gives every token a similar probability,
+     * and the initial loss is close to ln(vocabSize), about 10.8.
+     */
     this.weights = Array.from({ length: this.vocabSize }, () =>
-      Array.from({ length: this.embeddingSize }, () => min + this.random() * (max - min))
+      Array.from({ length: this.embeddingSize }, () => randomNormal(this.standardDeviation))
     );
 
     if (DEBUG.LINEAR_OUTPUT_LAYER) console.log(
@@ -106,6 +139,7 @@ class LinearOutputLayer {
 
     // Print the whole output in verbose mode; otherwise just its dimensions.
     if (DEBUG.LINEAR_OUTPUT_LAYER) {
+      console.log("LinearOutputLayer| Inference complete.");
       if (DEBUG.VERBOSE) {
         console.log("LinearOutputLayer| Output (one row per token):");
         console.table(output);

@@ -30,8 +30,17 @@ class GPTModel {
   /** Probability, between 0 and 1, that each embedding value is dropped (set to zero) by dropout. */
   dropoutRate: number;
 
-  /** True in training mode, when dropout is applied to the embeddings; false in inference mode, when it is skipped. */
-  training: boolean;
+  /**
+   * True in training mode, when dropout is applied to the embeddings; false
+   * in inference mode, when it is skipped. Read from Hyperparameters on every
+   * access, so changing Hyperparameters.training after construction takes effect.
+   */
+  get training(): boolean {
+    return this.isTraining();
+  }
+
+  /** Reads the Hyperparameters' current training flag. */
+  private readonly isTraining: () => boolean;
 
   /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
   private readonly random: () => number;
@@ -48,7 +57,7 @@ class GPTModel {
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.dropoutRate = hyperparameters.dropoutRate;
-    this.training = hyperparameters.training;
+    this.isTraining = () => hyperparameters.training;
     this.random = () => hyperparameters.random();
 
     this.embedding = new Embedding(hyperparameters);
@@ -97,7 +106,8 @@ class GPTModel {
 
       if (DEBUG.GPT_MODEL) {
         console.log(`GPTModel| Embeddings after dropout (dropout rate ${this.dropoutRate}):`);
-        console.table(droppedEmbeddings);
+        if(DEBUG.VERBOSE)
+          console.table(droppedEmbeddings);
       }
     }
 
@@ -112,7 +122,8 @@ class GPTModel {
 
     if (DEBUG.GPT_MODEL) {
       console.log("GPTModel| Output of final layer normalization (one row per token):");
-      console.table(normalizedOutput);
+      if(DEBUG.VERBOSE)
+        console.table(normalizedOutput);
     }
 
     // Logits for every token in training mode; probabilities for the next token in inference mode.

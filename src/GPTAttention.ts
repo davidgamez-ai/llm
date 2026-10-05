@@ -18,8 +18,18 @@ class GPTAttention {
   /** Probability, between 0 and 1, that each attention weight is dropped (set to zero) by dropout. */
   dropoutRate: number;
 
-  /** True in training mode, when dropout is applied to the attention weights; false in inference mode, when it is skipped. */
-  training: boolean;
+  /**
+   * True in training mode, when dropout is applied to the attention weights;
+   * false in inference mode, when it is skipped. Read from Hyperparameters on
+   * every access, so changing Hyperparameters.training after construction
+   * takes effect.
+   */
+  get training(): boolean {
+    return this.isTraining();
+  }
+
+  /** Reads the Hyperparameters' current training flag. */
+  private readonly isTraining: () => boolean;
 
   /** The query weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
   queryWeights: number[][] = [];
@@ -47,7 +57,7 @@ class GPTAttention {
 
   /**
    * Creates a GPTAttention, copying embeddingSize, weightMatrixColumns,
-   * dropoutRate, training and qkvBias from the given Hyperparameters so this
+   * dropoutRate and qkvBias from the given Hyperparameters so this
    * instance always matches the values used elsewhere in the application,
    * then builds the weight matrices and biases.
    *
@@ -57,7 +67,7 @@ class GPTAttention {
     this.embeddingSize = hyperparameters.embeddingSize;
     this.weightMatrixColumns = hyperparameters.weightMatrixColumns;
     this.dropoutRate = hyperparameters.dropoutRate;
-    this.training = hyperparameters.training;
+    this.isTraining = () => hyperparameters.training;
     this.qkvBias = hyperparameters.qkvBias;
     this.random = () => hyperparameters.random();
 

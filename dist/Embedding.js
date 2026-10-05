@@ -22,6 +22,12 @@ class Embedding {
      * implementation uses 0.01 for its position embeddings (wpe).
      */
     positionEmbeddingStandardDeviation;
+    /**
+     * Standard deviation of the normal distribution (mean 0) used to
+     * initialize the token embedding matrix. GPT-2 uses 0.02 for its token
+     * embeddings (wte).
+     */
+    tokenEmbeddingStandardDeviation;
     // The token embedding matrix built by build(): one row per vocabulary
     // token, each row embeddingSize values wide. Looked up by token id.
     textEmbeddingMatrix = [];
@@ -32,25 +38,28 @@ class Embedding {
     /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
     random;
     /**
-     * Creates an Embedding, copying vocabSize, contextLength, embeddingSize
-     * and positionEmbeddingStandardDeviation from the given Hyperparameters so
-     * this instance always matches the values used elsewhere in the
-     * application.
+     * Creates an Embedding, copying vocabSize, contextLength, embeddingSize,
+     * positionEmbeddingStandardDeviation and tokenEmbeddingStandardDeviation
+     * from the given Hyperparameters so this instance always matches the
+     * values used elsewhere in the application.
      *
-     * @param hyperparameters - Source of vocabularySize, contextLength, embeddingSize, positionEmbeddingStandardDeviation and the random number stream. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of vocabularySize, contextLength, embeddingSize, positionEmbeddingStandardDeviation, tokenEmbeddingStandardDeviation and the random number stream. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.vocabSize = hyperparameters.vocabularySize;
         this.contextLength = hyperparameters.contextLength;
         this.embeddingSize = hyperparameters.embeddingSize;
         this.positionEmbeddingStandardDeviation = hyperparameters.positionEmbeddingStandardDeviation;
+        this.tokenEmbeddingStandardDeviation = hyperparameters.tokenEmbeddingStandardDeviation;
         this.random = () => hyperparameters.random();
     }
     /**
      * Builds the two embedding matrices, stores them on the instance, and logs
      * their dimensions:
-     * - textEmbeddingMatrix: vocabSize x embeddingSize, filled with values
-     *   drawn uniformly from [min, max).
+     * - textEmbeddingMatrix: vocabSize x embeddingSize, initialized as in
+     *   GPT-2 (Hugging Face GPT2Model._init_weights), with values drawn from a
+     *   normal distribution with mean 0 and standard deviation
+     *   tokenEmbeddingStandardDeviation (0.02 by default).
      * - positionEmbeddingMatrix: contextLength x embeddingSize, initialized as
      *   in GPT-2, with values drawn from a normal distribution with mean 0 and
      *   standard deviation positionEmbeddingStandardDeviation (0.01 by default).
@@ -58,11 +67,9 @@ class Embedding {
      * Random values come from the Hyperparameters' shared stream, so the
      * matrices are reproducible when Hyperparameters.seed is set.
      *
-     * @param min - Inclusive lower bound of the token embedding random range. Defaults to -3.
-     * @param max - Exclusive upper bound of the token embedding random range. Defaults to 3.
      * @returns void. The resulting matrices are stored on the instance for use by getEmbedding.
      */
-    build(min = -3, max = 3) {
+    build() {
         const random = this.random;
         /*
          * Draws one sample from a normal distribution with mean 0 and the given
@@ -75,7 +82,7 @@ class Embedding {
             const u2 = random();
             return standardDeviation * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
         };
-        this.textEmbeddingMatrix = Array.from({ length: this.vocabSize }, () => Array.from({ length: this.embeddingSize }, () => min + random() * (max - min)));
+        this.textEmbeddingMatrix = Array.from({ length: this.vocabSize }, () => Array.from({ length: this.embeddingSize }, () => randomNormal(this.tokenEmbeddingStandardDeviation)));
         this.positionEmbeddingMatrix = Array.from({ length: this.contextLength }, () => Array.from({ length: this.embeddingSize }, () => randomNormal(this.positionEmbeddingStandardDeviation)));
         if (DEBUG.EMBEDDING) {
             console.log(`Embeddings| Token embedding matrix built. Rows: ${this.textEmbeddingMatrix.length}; columns: ${this.textEmbeddingMatrix[0].length}`);

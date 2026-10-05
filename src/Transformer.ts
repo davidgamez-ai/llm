@@ -35,8 +35,18 @@ class Transformer {
   /** Probability, between 0 and 1, that each value of the feed forward output is dropped (set to zero) by dropout. */
   dropoutRate: number;
 
-  /** True in training mode, when dropout is applied to the feed forward output; false in inference mode, when it is skipped. */
-  training: boolean;
+  /**
+   * True in training mode, when dropout is applied to the feed forward
+   * output; false in inference mode, when it is skipped. Read from
+   * Hyperparameters on every access, so changing Hyperparameters.training
+   * after construction takes effect.
+   */
+  get training(): boolean {
+    return this.isTraining();
+  }
+
+  /** Reads the Hyperparameters' current training flag. */
+  private readonly isTraining: () => boolean;
 
   /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
   private readonly random: () => number;
@@ -44,15 +54,15 @@ class Transformer {
   /**
    * Creates a Transformer with its own MultiHeadAttention, FeedForward and
    * two LayerNormalization instances, all built from the same
-   * Hyperparameters so their dimensions match, and copies dropoutRate and
-   * training from them. Each layer normalization has its own trainable
+   * Hyperparameters so their dimensions match, and copies dropoutRate
+   * from them. Each layer normalization has its own trainable
    * scale and shift, so the two are separate instances.
    *
    * @param hyperparameters - Source of dropoutRate, training and the random number stream, and passed on to MultiHeadAttention, FeedForward and LayerNormalization. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.dropoutRate = hyperparameters.dropoutRate;
-    this.training = hyperparameters.training;
+    this.isTraining = () => hyperparameters.training;
     this.random = () => hyperparameters.random();
     this.multiHeadAttention = new MultiHeadAttention(hyperparameters);
     this.feedForward = new FeedForward(hyperparameters);

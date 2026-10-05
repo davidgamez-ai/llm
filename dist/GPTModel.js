@@ -24,8 +24,16 @@ class GPTModel {
     linearOutputLayer;
     /** Probability, between 0 and 1, that each embedding value is dropped (set to zero) by dropout. */
     dropoutRate;
-    /** True in training mode, when dropout is applied to the embeddings; false in inference mode, when it is skipped. */
-    training;
+    /**
+     * True in training mode, when dropout is applied to the embeddings; false
+     * in inference mode, when it is skipped. Read from Hyperparameters on every
+     * access, so changing Hyperparameters.training after construction takes effect.
+     */
+    get training() {
+        return this.isTraining();
+    }
+    /** Reads the Hyperparameters' current training flag. */
+    isTraining;
     /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
     random;
     /**
@@ -40,7 +48,7 @@ class GPTModel {
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.dropoutRate = hyperparameters.dropoutRate;
-        this.training = hyperparameters.training;
+        this.isTraining = () => hyperparameters.training;
         this.random = () => hyperparameters.random();
         this.embedding = new Embedding(hyperparameters);
         this.embedding.build();
@@ -77,7 +85,8 @@ class GPTModel {
             droppedEmbeddings = embeddings.map((vector) => vector.map((value) => (this.random() < this.dropoutRate ? 0 : value * keepScale)));
             if (DEBUG.GPT_MODEL) {
                 console.log(`GPTModel| Embeddings after dropout (dropout rate ${this.dropoutRate}):`);
-                console.table(droppedEmbeddings);
+                if (DEBUG.VERBOSE)
+                    console.table(droppedEmbeddings);
             }
         }
         // Pass the embeddings through each transformer block in sequence, feeding each block's output into the next.
@@ -89,7 +98,8 @@ class GPTModel {
         const normalizedOutput = transformerOutput.map((vector) => this.finalLayerNormalization.calculate(vector));
         if (DEBUG.GPT_MODEL) {
             console.log("GPTModel| Output of final layer normalization (one row per token):");
-            console.table(normalizedOutput);
+            if (DEBUG.VERBOSE)
+                console.table(normalizedOutput);
         }
         // Logits for every token in training mode; probabilities for the next token in inference mode.
         return this.linearOutputLayer.calculate(normalizedOutput);

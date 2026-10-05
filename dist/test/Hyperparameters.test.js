@@ -122,3 +122,33 @@ test("positionEmbeddingStandardDeviation setter rejects negative, infinite and N
     }
     assert.equal(hyperparameters.positionEmbeddingStandardDeviation, 0.01);
 });
+// The weight initialization standard deviations that default to GPT-2's 0.02.
+const gpt2StandardDeviations = [
+    "tokenEmbeddingStandardDeviation",
+    "attentionProjectionStandardDeviation",
+    "outputLayerStandardDeviation",
+];
+test("weight initialization standard deviations default to 0.02, as in GPT-2", () => {
+    const hyperparameters = new Hyperparameters();
+    for (const name of gpt2StandardDeviations) {
+        assert.equal(hyperparameters[name], 0.02, name);
+    }
+});
+test("weight initialization standard deviation setters accept 0 and positive finite values", () => {
+    const hyperparameters = new Hyperparameters();
+    for (const name of gpt2StandardDeviations) {
+        hyperparameters[name] = 0;
+        assert.equal(hyperparameters[name], 0, name);
+        hyperparameters[name] = 0.05;
+        assert.equal(hyperparameters[name], 0.05, name);
+    }
+});
+test("weight initialization standard deviation setters reject negative, infinite and NaN values, leaving state unchanged", () => {
+    const hyperparameters = new Hyperparameters();
+    for (const name of gpt2StandardDeviations) {
+        for (const value of [-0.01, Infinity, NaN]) {
+            assert.throws(() => { hyperparameters[name] = value; }, RangeError, `${name} accepted ${value}`);
+        }
+        assert.equal(hyperparameters[name], 0.02, name);
+    }
+});

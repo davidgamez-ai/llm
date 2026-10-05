@@ -21,6 +21,9 @@ class MultiHeadAttention {
   /** Number of transformer blocks in the model, used to scale the output projection's initial weights. */
   numberTransformerBlocks: number;
 
+  /** Base standard deviation for the output projection's initial weights, before scaling by 1 / sqrt(2 * numberTransformerBlocks). */
+  attentionProjectionStandardDeviation: number;
+
   /** Output projection weights built by build(): embeddingSize rows by embeddingSize columns. */
   outputProjectionWeights: number[][] = [];
 
@@ -36,11 +39,12 @@ class MultiHeadAttention {
    * same dimensions, dropout rate and training mode, then builds the
    * output projection.
    *
-   * @param hyperparameters - Source of numberAttentionHeads, embeddingSize, numberTransformerBlocks and the random number stream, and passed on to each GPTAttention head. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of numberAttentionHeads, embeddingSize, numberTransformerBlocks, attentionProjectionStandardDeviation and the random number stream, and passed on to each GPTAttention head. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.embeddingSize = hyperparameters.embeddingSize;
     this.numberTransformerBlocks = hyperparameters.numberTransformerBlocks;
+    this.attentionProjectionStandardDeviation = hyperparameters.attentionProjectionStandardDeviation;
     this.random = () => hyperparameters.random();
     this.attentionHeads = Array.from(
       { length: hyperparameters.numberAttentionHeads },
@@ -57,7 +61,8 @@ class MultiHeadAttention {
    * matrix and an embeddingSize bias vector, stored on the instance.
    * Initialized as in GPT-2 (Hugging Face GPT2Model._init_weights):
    * - Weights are drawn from a normal distribution with mean 0 and standard
-   *   deviation 0.02 / sqrt(2 * numberTransformerBlocks).
+   *   deviation attentionProjectionStandardDeviation (0.02 by default)
+   *   divided by sqrt(2 * numberTransformerBlocks).
    * - Biases are set to 0.
    *
    * @returns void. The resulting weights and biases are stored on the instance.
@@ -70,7 +75,7 @@ class MultiHeadAttention {
      * so the GPT-2 paper scales these weights by 1 / sqrt(2 * numberOfBlocks)
      * to stop the residual stream's variance growing with the model's depth.
      */
-    const standardDeviation = 0.02 / Math.sqrt(2 * this.numberTransformerBlocks);
+    const standardDeviation = this.attentionProjectionStandardDeviation / Math.sqrt(2 * this.numberTransformerBlocks);
 
     /*
      * Draws one sample from a normal distribution with mean 0 and the given
