@@ -9,7 +9,7 @@ import Hyperparameters from "./Hyperparameters.js";
 class Decoder {
   /**
    * The Hyperparameters this decoder was built with. A reference is kept,
-   * rather than copies of its values, so that switching training mode off
+   * rather than copies of its values, so that switching to generation mode
    * after construction is seen by the decoder.
    */
   private readonly hyperparameters: Hyperparameters;
@@ -25,7 +25,7 @@ class Decoder {
    * random number stream, so the choices are reproducible when
    * Hyperparameters.seed is set and differ on every run when it is not.
    *
-   * @param hyperparameters - Source of the training flag, vocabularySize and the random number stream. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of the mode, vocabularySize and the random number stream. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.hyperparameters = hyperparameters;
@@ -39,7 +39,7 @@ class Decoder {
    *
    * @param probabilities - One probability per token in the vocabulary, indexed by token id. Must be vocabularySize long.
    * @returns The text of the chosen token.
-   * @throws Error if the hyperparameters are in training mode, since text is only generated during inference.
+   * @throws Error if the hyperparameters are not in generation mode, since text is only generated in that mode.
    * @throws RangeError if probabilities is not vocabularySize long.
    */
   greedy(probabilities: number[]): string {
@@ -75,12 +75,12 @@ class Decoder {
    * whole vocabulary.
    *
    * @param probabilities - The probabilities to check.
-   * @throws Error if the hyperparameters are in training mode.
+   * @throws Error if the hyperparameters are not in generation mode.
    * @throws RangeError if probabilities is not vocabularySize long.
    */
   private validate(probabilities: number[]): void {
-    if (this.hyperparameters.training) {
-      throw new Error("Decoder| Training mode must be off to decode tokens");
+    if (this.hyperparameters.mode !== Hyperparameters.GENERATION_MODE) {
+      throw new Error("Decoder| Mode must be GENERATION_MODE to decode tokens");
     }
     if (probabilities.length !== this.hyperparameters.vocabularySize) {
       throw new RangeError(

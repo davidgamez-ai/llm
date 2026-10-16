@@ -19,17 +19,17 @@ class GPTAttention {
   dropoutRate: number;
 
   /**
-   * True in training mode, when dropout is applied to the attention weights;
-   * false in inference mode, when it is skipped. Read from Hyperparameters on
-   * every access, so changing Hyperparameters.training after construction
-   * takes effect.
+   * The current mode: Hyperparameters.TRAINING_MODE, VALIDATION_MODE or
+   * GENERATION_MODE. Dropout is only applied to the attention weights in
+   * TRAINING_MODE. Read from Hyperparameters on every access, so changing
+   * Hyperparameters.mode after construction takes effect.
    */
-  get training(): boolean {
-    return this.isTraining();
+  get mode(): number {
+    return this.getMode();
   }
 
-  /** Reads the Hyperparameters' current training flag. */
-  private readonly isTraining: () => boolean;
+  /** Reads the Hyperparameters' current mode. */
+  private readonly getMode: () => number;
 
   /** The query weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
   queryWeights: number[][] = [];
@@ -61,13 +61,13 @@ class GPTAttention {
    * instance always matches the values used elsewhere in the application,
    * then builds the weight matrices and biases.
    *
-   * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate, training, qkvBias and the random number stream. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate, mode, qkvBias and the random number stream. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.embeddingSize = hyperparameters.embeddingSize;
     this.weightMatrixColumns = hyperparameters.weightMatrixColumns;
     this.dropoutRate = hyperparameters.dropoutRate;
-    this.isTraining = () => hyperparameters.training;
+    this.getMode = () => hyperparameters.mode;
     this.qkvBias = hyperparameters.qkvBias;
     this.random = () => hyperparameters.random();
 
@@ -141,10 +141,12 @@ class GPTAttention {
    * each tokenCount rows by weightMatrixColumns columns. Each token's query
    * is then multiplied (dot product) by every token's key to give that
    * token's attention scores. These scores are scaled by the square root of
-   * the key dimension and passed through a softmax to give attention weights.
-   * A causal mask then zeroes the weights above the diagonal, and each row
-   * is re-normalized to sum to 1. In training mode dropout is then applied
-   * to give the final attention weights; in inference mode it is skipped.
+   * the key dimension, and a causal mask sets the scores above the diagonal
+   * (tokens later in the sequence) to -Infinity. A softmax across each row
+   * then gives attention weights in which the masked tokens are 0 and each
+   * row sums to 1. In training mode dropout is then applied
+   * to give the final attention weights; in validation and generation modes
+   * it is skipped.
    * Finally, each token's context vector is the sum of every token's value
    * vector multiplied by the corresponding final attention weight. The
    * intermediate matrices are logged but not returned.
@@ -220,82 +222,61 @@ class GPTAttention {
 
     /*
      * Scale each token's attention scores by dividing them by the square
-     * root of the key dimension (weightMatrixColumns), then apply a softmax
-     * across each row. Scaling stops the dot products growing with the key
-     * dimension, which would otherwise push the softmax towards a one-hot
-     * output with tiny gradients. The softmax turns each row into attention
-     * weights that are all positive and sum to 1. The row's maximum is
-     * subtracted before exponentiating to avoid overflow; this does not
-     * change the result because softmax is unaffected by adding a constant
-     * to every input.
+     * root of the key dimension (weightMatrixColumns). Scaling stops the dot
+     * products growing with the key dimension, which would otherwise push
+     * the softmax towards a one-hot output with tiny gradients.
+     *
+     * At the same time apply the causal mask: the score of every token that
+     * comes after token i in the sequence (column > row, above the diagonal)
+     * is replaced with -Infinity, so token i can only attend to tokens 0..i.
+     * Masking before the softmax, as the book does, means the masked tokens
+     * take no part in the softmax at all, so no re-normalization is needed
+     * afterwards.
      */
     const scale = Math.sqrt(this.weightMatrixColumns);
-    const attentionWeights: number[][] = attentionScores.map((row) => {
-      const scaled = row.map((score) => score / scale);
-      const max = Math.max(...scaled);
-      const exponentials = scaled.map((score) => Math.exp(score - max));
+    const maskedScores: number[][] = attentionScores.map((row, rowIndex) =>
+      row.map((score, columnIndex) => (columnIndex <= rowIndex ? score / scale : -Infinity))
+    );
+
+    if(DEBUG.ATTENTION) {
+      console.log("GPTAttention| Scaled and causally masked attention scores (-Infinity = masked):");
+      console.table(maskedScores);
+    }
+
+    /*
+     * Apply a softmax across each row to turn the masked scores into
+     * attention weights that are all positive and sum to 1. Because
+     * exp(-Infinity) is 0, the masked tokens get a weight of exactly 0.
+     *
+     * The row's maximum is subtracted before exponentiating to avoid
+     * overflow; this does not change the result because softmax is
+     * unaffected by adding a constant to every input. The maximum is taken
+     * after masking, so it always comes from a visible token. The visible
+     * token with that maximum therefore has exp(0) = 1, which means the row
+     * total is at least 1 and can never underflow to 0. (Taking the maximum
+     * before masking could make every visible exponential underflow to 0 if
+     * a future token's score was much larger, giving a NaN row.) The diagonal
+     * is never masked, so every row has at least one finite score.
+     */
+    const attentionWeights: number[][] = maskedScores.map((row) => {
+      const max = Math.max(...row);
+      const exponentials = row.map((score) => Math.exp(score - max));
       const total = exponentials.reduce((sum, value) => sum + value, 0);
       return exponentials.map((value) => value / total);
     });
 
     if(DEBUG.ATTENTION) {
-      console.log("GPTAttention| Attention weights (scaled and softmaxed; each row sums to 1):");
+      console.log("GPTAttention| Attention weights (masked softmax; values above the diagonal are 0, each row sums to 1):");
       console.table(attentionWeights);
     }
 
     /*
-     * Build a causal attention mask with the same tokenCount x tokenCount
-     * dimensions as the attention weight matrix. Entries on or below the
-     * diagonal are 1 and entries above it are 0, so row i only keeps tokens
-     * 0..i and hides any token that comes after token i in the sequence.
-     */
-    const causalMask: number[][] = attentionWeights.map((row, rowIndex) =>
-      row.map((_, columnIndex) => (columnIndex <= rowIndex ? 1 : 0))
-    );
-
-    if(DEBUG.ATTENTION) {
-      console.log("GPTAttention| Causal attention mask (1 = visible, 0 = masked):");
-      console.table(causalMask);
-    }
-    /*
-     * Multiply the attention weights element by element with the causal
-     * mask. Weights on or below the diagonal are kept (multiplied by 1) and
-     * weights above the diagonal are zeroed (multiplied by 0), so each token
-     * no longer attends to tokens that come after it.
-     */
-    const maskedAttentionWeights: number[][] = attentionWeights.map((row, rowIndex) =>
-      row.map((weight, columnIndex) => weight * causalMask[rowIndex][columnIndex])
-    );
-
-    if(DEBUG.ATTENTION) {
-      console.log("GPTAttention| Masked attention weights (values above the diagonal zeroed):");
-      console.table(maskedAttentionWeights);
-    }
-
-    /*
-     * Re-normalize the masked attention weights by dividing every element
-     * in a row by that row's sum, so each row sums to 1 again. Masking
-     * removed the weights above the diagonal, leaving rows that sum to less
-     * than 1. A row sum can never be zero because the diagonal is always
-     * kept and every softmax output is positive.
-     */
-    const normalizedMaskedAttentionWeights: number[][] = maskedAttentionWeights.map((row) => {
-      const rowSum = row.reduce((sum, weight) => sum + weight, 0);
-      return row.map((weight) => weight / rowSum);
-    });
-
-    if(DEBUG.ATTENTION) {
-      console.log("GPTAttention| Re-normalized masked attention weights (each row sums to 1):");
-      console.table(normalizedMaskedAttentionWeights);
-    }
-
-    /*
-     * Dropout is only applied in training mode. In inference mode the
-     * re-normalized masked attention weights are used unchanged as the
+     * Dropout is only applied in training mode. In validation and
+     * generation modes the attention weights are used unchanged as the
      * final attention weights, so the output is deterministic.
      */
     let finalAttentionWeights: number[][];
-    if (this.training) {
+    if (this.mode === Hyperparameters.TRAINING_MODE) {
       /*
        * Build a dropout mask with the same tokenCount x tokenCount
        * dimensions as the attention weights. Each entry is independently
@@ -303,10 +284,10 @@ class GPTAttention {
        * proportion of the mask is zero. The remaining entries are set to
        * 1 / (1 - dropoutRate) so that, once the mask is applied, the
        * expected value of each attention weight is unchanged. With the
-       * default dropoutRate of 0.5 the kept entries are 2.
+       * default dropoutRate of 0.1 the kept entries are 1 / 0.9, about 1.11.
        */
       const keepScale = 1 / (1 - this.dropoutRate);
-      const dropoutMask: number[][] = normalizedMaskedAttentionWeights.map((row) =>
+      const dropoutMask: number[][] = attentionWeights.map((row) =>
         row.map(() => (this.random() < this.dropoutRate ? 0 : keepScale))
       );
       if(DEBUG.ATTENTION) {
@@ -315,19 +296,19 @@ class GPTAttention {
       }
 
       /*
-       * Apply dropout by multiplying the re-normalized masked attention
-       * weights element by element with the dropout mask. Dropped weights
-       * become 0 and kept weights are scaled by 1 / (1 - dropoutRate).
+       * Apply dropout by multiplying the attention weights element by
+       * element with the dropout mask. Dropped weights become 0 and kept
+       * weights are scaled by 1 / (1 - dropoutRate).
        */
-      finalAttentionWeights = normalizedMaskedAttentionWeights.map((row, rowIndex) =>
+      finalAttentionWeights = attentionWeights.map((row, rowIndex) =>
         row.map((weight, columnIndex) => weight * dropoutMask[rowIndex][columnIndex])
       );
 
       if(DEBUG.ATTENTION) console.log("GPTAttention| Final attention weights (after causal mask and dropout):");
     } else {
-      finalAttentionWeights = normalizedMaskedAttentionWeights;
+      finalAttentionWeights = attentionWeights;
 
-      if(DEBUG.ATTENTION) console.log("GPTAttention| Inference mode: dropout skipped. Final attention weights (after causal mask):");
+      if(DEBUG.ATTENTION) console.log("GPTAttention| Validation or generation mode: dropout skipped. Final attention weights (after causal mask):");
     }
     if(DEBUG.ATTENTION) console.table(finalAttentionWeights);
 

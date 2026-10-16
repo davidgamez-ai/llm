@@ -17,17 +17,18 @@ class LinearOutputLayer {
   embeddingSize: number;
 
   /**
-   * True in training mode, when logits are calculated for every token; false
-   * in inference mode, when they are only calculated for the last token.
-   * Read from Hyperparameters on every access, so changing
-   * Hyperparameters.training after construction takes effect.
+   * The current mode: Hyperparameters.TRAINING_MODE, VALIDATION_MODE or
+   * GENERATION_MODE. Logits are calculated for every token in training and
+   * validation modes, and only for the last token in generation mode. Read
+   * from Hyperparameters on every access, so changing Hyperparameters.mode
+   * after construction takes effect.
    */
-  get training(): boolean {
-    return this.isTraining();
+  get mode(): number {
+    return this.getMode();
   }
 
-  /** Reads the Hyperparameters' current training flag. */
-  private readonly isTraining: () => boolean;
+  /** Reads the Hyperparameters' current mode. */
+  private readonly getMode: () => number;
 
   /** Standard deviation of the normal distribution (mean 0) used to initialize the weight matrix. GPT-2 uses 0.02. */
   standardDeviation: number;
@@ -43,13 +44,13 @@ class LinearOutputLayer {
    * outputLayerStandardDeviation from the given Hyperparameters so this
    * instance always matches the values used elsewhere in the application.
    *
-   * @param hyperparameters - Source of vocabularySize, embeddingSize, outputLayerStandardDeviation, training and the random number stream. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of vocabularySize, embeddingSize, outputLayerStandardDeviation, mode and the random number stream. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.vocabSize = hyperparameters.vocabularySize;
     this.embeddingSize = hyperparameters.embeddingSize;
     this.standardDeviation = hyperparameters.outputLayerStandardDeviation;
-    this.isTraining = () => hyperparameters.training;
+    this.getMode = () => hyperparameters.mode;
     this.random = () => hyperparameters.random();
   }
 
@@ -100,17 +101,18 @@ class LinearOutputLayer {
    * embeddings (numberOfTokens x embeddingSize) multiplied by the transpose
    * of weights (embeddingSize x vocabSize).
    *
-   * In training mode logits are calculated for every token, since the model
-   * learns to predict the next token at every position in the sequence. In
-   * inference mode only the last token's logits are needed to predict the
-   * next token, so the other tokens are skipped, and a softmax is applied to
-   * turn the logits into probabilities.
+   * In training and validation modes logits are calculated for every token,
+   * since the loss is measured on the prediction of the next token at every
+   * position in the sequence. In generation mode only the last token's
+   * logits are needed to predict the next token, so the other tokens are
+   * skipped. The logits are returned unchanged in every mode; turning them
+   * into probabilities is left to the caller (e.g. Generator).
    *
    * @param embeddings - Token embeddings: one row per token, each row embeddingSize values wide.
-   * @returns Each row vocabSize values wide: in training mode the logits, one row per token, in token order; in inference mode a single row of softmax probabilities for the last token.
+   * @returns The logits, each row vocabSize values wide: in training and validation modes one row per token, in token order; in generation mode a single row for the last token.
    */
   calculate(embeddings: number[][]): number[][] {
-    const selectedEmbeddings = this.training ? embeddings : embeddings.slice(-1);
+    const selectedEmbeddings = this.mode === Hyperparameters.GENERATION_MODE ? embeddings.slice(-1) : embeddings;
 
     const logits = selectedEmbeddings.map((embedding) =>
       this.weights.map((weightRow) =>
@@ -118,37 +120,18 @@ class LinearOutputLayer {
       )
     );
 
-    /*
-     * In inference mode, apply a softmax to each row of logits to turn them
-     * into a probability distribution over the vocabulary: every value
-     * positive and the row summing to 1. The row's maximum is subtracted
-     * before exponentiating to avoid overflow; this does not change the
-     * result because softmax is unaffected by adding a constant to every
-     * input. The maximum is found with reduce rather than Math.max(...row),
-     * because spreading a vocabulary-sized row as arguments can exceed the
-     * engine's argument limit.
-     */
-    const output = this.training
-      ? logits
-      : logits.map((row) => {
-          const maxLogit = row.reduce((max, value) => Math.max(max, value), -Infinity);
-          const exponentiated = row.map((value) => Math.exp(value - maxLogit));
-          const total = exponentiated.reduce((sum, value) => sum + value, 0);
-          return exponentiated.map((value) => value / total);
-        });
-
     // Print the whole output in verbose mode; otherwise just its dimensions.
     if (DEBUG.LINEAR_OUTPUT_LAYER) {
-      console.log("LinearOutputLayer| Inference complete.");
+      console.log("LinearOutputLayer| Calculation complete.");
       if (DEBUG.VERBOSE) {
-        console.log("LinearOutputLayer| Output (one row per token):");
-        console.table(output);
+        console.log("LinearOutputLayer| Logits (one row per token):");
+        console.table(logits);
       } else {
-        console.log(`LinearOutputLayer| Output. Rows: ${output.length}; columns: ${output[0]?.length ?? 0}`);
+        console.log(`LinearOutputLayer| Logits. Rows: ${logits.length}; columns: ${logits[0]?.length ?? 0}`);
       }
     }
 
-    return output;
+    return logits;
   }
 
   /**

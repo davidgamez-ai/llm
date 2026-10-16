@@ -9,18 +9,49 @@ test("unvalidated setters store the new value", () => {
   const hyperparameters = new Hyperparameters();
 
   hyperparameters.contextLength = 256;
-  hyperparameters.training = false;
   hyperparameters.qkvBias = true;
   hyperparameters.feedForwardBias = false;
 
   assert.equal(hyperparameters.contextLength, 256);
-  assert.equal(hyperparameters.training, false);
   assert.equal(hyperparameters.qkvBias, true);
   assert.equal(hyperparameters.feedForwardBias, false);
 });
 
+test("mode defaults to TRAINING_MODE", () => {
+  assert.equal(new Hyperparameters().mode, Hyperparameters.TRAINING_MODE);
+});
+
+test("the three modes have distinct values", () => {
+  const modes = [Hyperparameters.TRAINING_MODE, Hyperparameters.VALIDATION_MODE, Hyperparameters.GENERATION_MODE];
+  assert.equal(new Set(modes).size, 3);
+});
+
+test("mode setter stores each of the three modes", () => {
+  const hyperparameters = new Hyperparameters();
+
+  for (const mode of [Hyperparameters.VALIDATION_MODE, Hyperparameters.GENERATION_MODE, Hyperparameters.TRAINING_MODE]) {
+    hyperparameters.mode = mode;
+    assert.equal(hyperparameters.mode, mode);
+  }
+});
+
+test("mode setter rejects values that are not one of the three modes, leaving state unchanged", () => {
+  const hyperparameters = new Hyperparameters();
+  hyperparameters.mode = Hyperparameters.VALIDATION_MODE;
+
+  for (const value of [-1, 3, 0.5, NaN]) {
+    assert.throws(() => { hyperparameters.mode = value; }, RangeError, `accepted ${value}`);
+  }
+
+  assert.equal(hyperparameters.mode, Hyperparameters.VALIDATION_MODE);
+});
+
+test("constructor rejects an invalid mode", () => {
+  assert.throws(() => new Hyperparameters(768, 1024, 0.1, 3), RangeError);
+});
+
 test("embeddingSize setter stores the value and recomputes weightMatrixColumns", () => {
-  const hyperparameters = new Hyperparameters(768, 1024, 0.1, true, 12);
+  const hyperparameters = new Hyperparameters(768, 1024, 0.1, Hyperparameters.TRAINING_MODE, 12);
 
   hyperparameters.embeddingSize = 1200;
 
@@ -29,7 +60,7 @@ test("embeddingSize setter stores the value and recomputes weightMatrixColumns",
 });
 
 test("embeddingSize setter rejects a size not divisible by numberAttentionHeads and leaves state unchanged", () => {
-  const hyperparameters = new Hyperparameters(768, 1024, 0.1, true, 12);
+  const hyperparameters = new Hyperparameters(768, 1024, 0.1, Hyperparameters.TRAINING_MODE, 12);
 
   assert.throws(() => { hyperparameters.embeddingSize = 770; }, RangeError);
   assert.throws(() => { hyperparameters.embeddingSize = NaN; }, RangeError);
@@ -39,7 +70,7 @@ test("embeddingSize setter rejects a size not divisible by numberAttentionHeads 
 });
 
 test("numberAttentionHeads setter stores the value and recomputes weightMatrixColumns", () => {
-  const hyperparameters = new Hyperparameters(768, 1024, 0.1, true, 12);
+  const hyperparameters = new Hyperparameters(768, 1024, 0.1, Hyperparameters.TRAINING_MODE, 12);
 
   hyperparameters.numberAttentionHeads = 8;
 
@@ -48,7 +79,7 @@ test("numberAttentionHeads setter stores the value and recomputes weightMatrixCo
 });
 
 test("numberAttentionHeads setter rejects invalid values and leaves state unchanged", () => {
-  const hyperparameters = new Hyperparameters(768, 1024, 0.1, true, 12);
+  const hyperparameters = new Hyperparameters(768, 1024, 0.1, Hyperparameters.TRAINING_MODE, 12);
 
   for (const value of NON_POSITIVE_INTEGERS) {
     assert.throws(() => { hyperparameters.numberAttentionHeads = value; }, RangeError, `accepted ${value}`);

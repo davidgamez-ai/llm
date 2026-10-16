@@ -14,12 +14,31 @@ import createSeededRandom from "./SeededRandom.js";
  * before those components are created.
  */
 class Hyperparameters {
+  /**
+   * Mode for training the model: dropout is applied, and the model returns
+   * logits for every token so the loss can be calculated at every position.
+   */
+  static readonly TRAINING_MODE: number = 0;
+
+  /**
+   * Mode for measuring the loss on held-out data: dropout is skipped, so the
+   * results are deterministic, but the model still returns logits for every
+   * token so the loss can be calculated at every position.
+   */
+  static readonly VALIDATION_MODE: number = 1;
+
+  /**
+   * Mode for generating text: dropout is skipped, and the model only returns
+   * logits for the last token, since only the next token is being predicted.
+   */
+  static readonly GENERATION_MODE: number = 2;
+
   private _embeddingSize: number;
   private _contextLength: number;
   private readonly _vocabularySize: number;
   private _weightMatrixColumns: number;
   private _dropoutRate: number;
-  private _training: boolean;
+  private _mode: number;
   private _numberAttentionHeads: number;
   private _numberTransformerBlocks: number;
   private _batchSize: number;
@@ -48,8 +67,8 @@ class Hyperparameters {
    * operates over at once.
    * @param dropoutRate - The probability, between 0 and 1 inclusive, that
    * any given value is dropped (set to zero) during dropout.
-   * @param training - True for training mode, in which dropout is applied;
-   * false for inference mode, in which dropout is skipped.
+   * @param mode - What the model is being used for: TRAINING_MODE,
+   * VALIDATION_MODE or GENERATION_MODE. Defaults to TRAINING_MODE.
    * @param numberAttentionHeads - The number of attention heads used in
    * multi-head attention. Must be a positive whole number that divides
    * embeddingSize exactly.
@@ -89,6 +108,7 @@ class Hyperparameters {
    * order. When omitted, Math.random() is used and results differ on every
    * run.
    * @throws RangeError if dropoutRate is less than 0, greater than 1 or NaN.
+   * @throws RangeError if mode is not TRAINING_MODE, VALIDATION_MODE or GENERATION_MODE.
    * @throws RangeError if numberAttentionHeads is not a positive whole number.
    * @throws RangeError if embeddingSize divided by numberAttentionHeads is
    * not a whole number.
@@ -103,7 +123,7 @@ class Hyperparameters {
     embeddingSize: number = 768,
     contextLength: number = 12,//GPT-2 uses 1024
     dropoutRate: number = 0.1,
-    training: boolean = true,
+    mode: number = Hyperparameters.TRAINING_MODE,
     numberAttentionHeads: number = 12,
     numberTransformerBlocks: number = 12,
     batchSize: number = 2,
@@ -117,6 +137,7 @@ class Hyperparameters {
     seed?: number
   ) {
     Hyperparameters.validateDropoutRate(dropoutRate);
+    Hyperparameters.validateMode(mode);
     Hyperparameters.validatePositiveInteger("numberAttentionHeads", numberAttentionHeads);
     const weightMatrixColumns = Hyperparameters.computeWeightMatrixColumns(embeddingSize, numberAttentionHeads);
     Hyperparameters.validatePositiveInteger("numberTransformerBlocks", numberTransformerBlocks);
@@ -132,7 +153,7 @@ class Hyperparameters {
     this._vocabularySize = new BPETokenizer().vocabularySize;
     this._weightMatrixColumns = weightMatrixColumns;
     this._dropoutRate = dropoutRate;
-    this._training = training;
+    this._mode = mode;
     this._numberAttentionHeads = numberAttentionHeads;
     this._numberTransformerBlocks = numberTransformerBlocks;
     this._batchSize = batchSize;
@@ -168,6 +189,27 @@ class Hyperparameters {
     // comparison, is rejected along with values outside [0, 1].
     if (!(dropoutRate >= 0 && dropoutRate <= 1)) {
       throw new RangeError(`Hyperparameters| dropoutRate must be between 0 and 1; got ${dropoutRate}`);
+    }
+  }
+
+  /**
+   * Checks that a mode is one of the three defined modes.
+   *
+   * @param mode - The mode to check.
+   * @throws RangeError if mode is not TRAINING_MODE, VALIDATION_MODE or GENERATION_MODE.
+   */
+  private static validateMode(mode: number): void {
+    const modes: number[] = [
+      Hyperparameters.TRAINING_MODE,
+      Hyperparameters.VALIDATION_MODE,
+      Hyperparameters.GENERATION_MODE,
+    ];
+    if (!modes.includes(mode)) {
+      throw new RangeError(
+        `Hyperparameters| mode must be TRAINING_MODE (${Hyperparameters.TRAINING_MODE}), ` +
+        `VALIDATION_MODE (${Hyperparameters.VALIDATION_MODE}) or ` +
+        `GENERATION_MODE (${Hyperparameters.GENERATION_MODE}); got ${mode}`
+      );
     }
   }
 
@@ -277,15 +319,20 @@ class Hyperparameters {
   }
 
   /**
-   * True for training mode, in which dropout is applied; false for
-   * inference mode, in which dropout is skipped.
+   * What the model is being used for: TRAINING_MODE (dropout applied,
+   * logits for every token), VALIDATION_MODE (no dropout, logits for every
+   * token) or GENERATION_MODE (no dropout, logits for the last token only).
+   * Components read this on every use, so changing it after they are built
+   * takes effect immediately.
    */
-  get training(): boolean {
-    return this._training;
+  get mode(): number {
+    return this._mode;
   }
 
-  set training(training: boolean) {
-    this._training = training;
+  /** @throws RangeError if mode is not TRAINING_MODE, VALIDATION_MODE or GENERATION_MODE. */
+  set mode(mode: number) {
+    Hyperparameters.validateMode(mode);
+    this._mode = mode;
   }
 
   /** The number of attention heads used in multi-head attention. */

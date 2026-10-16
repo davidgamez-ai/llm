@@ -23,14 +23,18 @@ class Trainer {
   private readonly model: GPTModel;
 
   /**
-   * Creates a Trainer, building its own tokenizer and model.
+   * Creates a Trainer for the given model, building its own tokenizer. The
+   * model is passed in rather than built here so that the same instance can
+   * be shared with a Generator, which then generates text with the trained
+   * weights.
    *
-   * @param hyperparameters - The settings used to build the model. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - The settings the model was built with; also the source of contextLength and batchSize, and the mode that train() switches to TRAINING_MODE.
+   * @param model - The model to train. Must have been built from the same hyperparameters.
    */
-  constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
+  constructor(hyperparameters: Hyperparameters, model: GPTModel) {
     this.hyperparameters = hyperparameters;
     this.tokenizer = new BPETokenizer();
-    this.model = new GPTModel(hyperparameters);
+    this.model = model;
   }
 
   /**
@@ -59,8 +63,8 @@ class Trainer {
    * is logged to the console. If the last batch has fewer than batchSize
    * windows, its average loss is logged as well.
    *
-   * Hyperparameters.training is switched on for the calculation and restored
-   * to its original value afterwards, even if an error is thrown.
+   * Hyperparameters.mode is switched to TRAINING_MODE for the calculation and
+   * restored to its original value afterwards, even if an error is thrown.
    *
    * @returns The loss averaged across every window.
    * @throws Error if fewer than 2 tokens have been loaded, since there is then no next token to predict.
@@ -70,8 +74,8 @@ class Trainer {
       throw new Error(`Trainer| At least 2 tokens must be loaded to train; got ${this.tokens.length}`);
     }
 
-    const originalTraining:boolean = this.hyperparameters.training;
-    this.hyperparameters.training = true;
+    const originalMode:number = this.hyperparameters.mode;
+    this.hyperparameters.mode = Hyperparameters.TRAINING_MODE;
 
     if (DEBUG.TRAINER) {
       console.log("Trainer| Training started.");
@@ -136,7 +140,7 @@ class Trainer {
 
       return averageLoss;
     } finally {
-      this.hyperparameters.training = originalTraining;
+      this.hyperparameters.mode = originalMode;
     }
   }
 
@@ -144,21 +148,21 @@ class Trainer {
    * Feeds one window of tokens into the model and calculates the average
    * cross entropy loss: the mean, over every position in the window, of the
    * negative log probability the model gives to the token that actually
-   * comes next. Hyperparameters.training must already be true, so the model
-   * returns logits for every position.
+   * comes next. Hyperparameters.mode must already be TRAINING_MODE or
+   * VALIDATION_MODE, so the model returns logits for every position.
    *
    * @param inputs - The token ids fed into the model.
    * @param targets - The token id that follows each input, i.e. the inputs shifted one place to the right. Must be the same length as inputs.
    * @returns The loss averaged across the window.
    */
   private calculateLoss(inputs: number[], targets: number[]): number {
-    // In training mode the model returns one row of logits per input token.
+    // In training and validation modes the model returns one row of logits per input token.
     const logits:number[][] = this.model.calculate(inputs);
 
     let totalLoss:number = 0;
     logits.forEach((row:number[], position:number) => {
       /*
-       * The model returns logits in training mode, so the log probability of
+       * The model returns logits rather than probabilities, so the log probability of
        * the target is found with a log-softmax: logit[target] minus the log
        * of the sum of the exponentiated logits. The row's maximum is
        * subtracted before exponentiating to avoid overflow; this does not
