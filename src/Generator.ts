@@ -4,10 +4,16 @@ import GPTModel from "./GPTModel.js";
 import Decoder from "./Decoder.js";
 
 /**
- * Generates text with a GPTModel. Starting from a prompt, it repeatedly feeds
- * the text into the model, converts the logits the model returns into
- * probabilities, decodes those into the next token's text and appends it,
- * until outputLength tokens have been generated.
+ * Generates text with a GPTModel. The prompt is encoded into token ids once.
+ * Then, until outputLength tokens have been generated, the ids are fed into
+ * the model, the logits it returns are converted into probabilities, the
+ * decoder chooses the next token's id from them, and that id is appended to
+ * the ids. Finally the generated ids are converted back into text.
+ *
+ * Working with ids throughout, as the book does, avoids converting the text
+ * back and forth on every step. That would not be safe: byte pair encoding
+ * does not always turn decoded text back into the same ids, because the new
+ * token's text can merge with the text before it.
  *
  * Tokens are currently chosen with greedy decoding.
  */
@@ -19,13 +25,13 @@ class Generator {
    */
   private readonly hyperparameters: Hyperparameters;
 
-  /** Converts text into the token ids fed to the model. */
+  /** Converts the prompt into token ids, and the generated ids back into text. */
   private readonly tokenizer: BPETokenizer;
 
   /** The model that produces a score (logit) for every possible next token. */
   private readonly model: GPTModel;
 
-  /** Converts the probabilities into the text of the chosen token. */
+  /** Chooses the id of the next token from the probabilities. */
   private readonly decoder: Decoder;
 
   /**
@@ -52,18 +58,28 @@ class Generator {
    *
    * @param text - The prompt to continue.
    * @returns The prompt followed by the generated text.
+   * @throws Error if the prompt encodes to no tokens, since the model then has nothing to predict from.
    * @throws Error if the hyperparameters are not in generation mode (thrown by Decoder).
    */
   generate(text: string): string {
+    // The prompt is encoded once; after that only token ids are used.
+    const tokenIds:number[] = this.tokenizer.encode(text);
+    if (tokenIds.length === 0) {
+      throw new Error("Generator| The prompt must contain at least one token");
+    }
+
+    // The ids of the generated tokens, kept separately so they can be decoded at the end.
+    const generatedIds:number[] = [];
+
     for (let t:number = 0; t < this.hyperparameters.outputLength; ++t) {
       /*
        * Only the last contextLength tokens are fed to the model, since the
        * position embedding has no rows beyond the context window. Once the
-       * text grows longer than that, the earliest tokens are dropped.
+       * sequence grows longer than that, the earliest tokens are dropped.
        */
-      const tokens:number[] = this.tokenizer.encode(text).slice(-this.hyperparameters.contextLength);
+      const context:number[] = [...tokenIds, ...generatedIds].slice(-this.hyperparameters.contextLength);
 
-      const logits:number[][] = this.model.calculate(tokens);
+      const logits:number[][] = this.model.calculate(context);
 
       /*
        * Only the last row of logits is needed: it scores every candidate for
@@ -73,9 +89,17 @@ class Generator {
        */
       const probabilities:number[] = Generator.softmax(logits[logits.length - 1]);
 
-      text += this.decoder.greedy(probabilities);
+      generatedIds.push(this.decoder.greedy(probabilities));
     }
-    return text;
+
+    /*
+     * Decode all the generated ids together rather than one at a time. A
+     * single character can be split across several tokens (e.g. some
+     * non-English characters and emoji), and decoding those tokens
+     * separately would garble it. The original prompt text is kept as it
+     * was given.
+     */
+    return text + this.tokenizer.decode(generatedIds);
   }
 
   /**

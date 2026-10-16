@@ -49,6 +49,8 @@ class Hyperparameters {
   private _attentionProjectionStandardDeviation: number;
   private _outputLayerStandardDeviation: number;
   private _outputLength: number;
+  private _trainingRatio: number;
+  private _numberEpochs: number;
   private _seed: number | undefined;
 
   /**
@@ -64,7 +66,12 @@ class Hyperparameters {
    *
    * @param embeddingSize - The size of each token embedding vector.
    * @param contextLength - The number of tokens of context the model
-   * operates over at once.
+   * operates over at once. Defaults to 12 to keep runs fast; GPT-2 uses
+   * 1024. The position embedding matrix has contextLength rows, so this
+   * also changes the parameter count: with the other defaults the model has
+   * 163,009,536 parameters (matching the book) only when contextLength is
+   * 1024, and 162,232,320 with the default of 12. Must be a positive whole
+   * number.
    * @param dropoutRate - The probability, between 0 and 1 inclusive, that
    * any given value is dropped (set to zero) during dropout.
    * @param mode - What the model is being used for: TRAINING_MODE,
@@ -101,12 +108,21 @@ class Hyperparameters {
    * number greater than or equal to 0.
    * @param outputLength - The number of tokens the model should generate.
    * Defaults to 2. Must be a positive whole number.
+   * @param trainingRatio - The proportion of the loaded text used for
+   * training; the rest is held back for validation. Defaults to 0.9, as in
+   * the book. Must be greater than 0 and less than 1, so that neither set
+   * is empty.
+   * @param numberEpochs - The number of times training passes over the whole
+   * training set. Defaults to 1. The book uses 10, but until the weights are
+   * updated every epoch gives the same loss, so further epochs only take
+   * time. Must be a positive whole number.
    * @param seed - Optional PRNG seed for the random number stream returned
    * by random(), which every component uses for weight initialization,
    * dropout and decoding. When provided, the same seed always produces the
    * same results, provided components are created and called in the same
    * order. When omitted, Math.random() is used and results differ on every
    * run.
+   * @throws RangeError if contextLength is not a positive whole number.
    * @throws RangeError if dropoutRate is less than 0, greater than 1 or NaN.
    * @throws RangeError if mode is not TRAINING_MODE, VALIDATION_MODE or GENERATION_MODE.
    * @throws RangeError if numberAttentionHeads is not a positive whole number.
@@ -118,6 +134,8 @@ class Hyperparameters {
    * tokenEmbeddingStandardDeviation, attentionProjectionStandardDeviation or
    * outputLayerStandardDeviation is negative, infinite or NaN.
    * @throws RangeError if outputLength is not a positive whole number.
+   * @throws RangeError if trainingRatio is not greater than 0 and less than 1.
+   * @throws RangeError if numberEpochs is not a positive whole number.
    */
   constructor(
     embeddingSize: number = 768,
@@ -134,8 +152,11 @@ class Hyperparameters {
     attentionProjectionStandardDeviation: number = 0.02,
     outputLayerStandardDeviation: number = 0.02,
     outputLength: number = 2,
+    trainingRatio: number = 0.9,
+    numberEpochs: number = 1,
     seed?: number
   ) {
+    Hyperparameters.validatePositiveInteger("contextLength", contextLength);
     Hyperparameters.validateDropoutRate(dropoutRate);
     Hyperparameters.validateMode(mode);
     Hyperparameters.validatePositiveInteger("numberAttentionHeads", numberAttentionHeads);
@@ -147,6 +168,8 @@ class Hyperparameters {
     Hyperparameters.validateStandardDeviation("attentionProjectionStandardDeviation", attentionProjectionStandardDeviation);
     Hyperparameters.validateStandardDeviation("outputLayerStandardDeviation", outputLayerStandardDeviation);
     Hyperparameters.validatePositiveInteger("outputLength", outputLength);
+    Hyperparameters.validateTrainingRatio(trainingRatio);
+    Hyperparameters.validatePositiveInteger("numberEpochs", numberEpochs);
 
     this._embeddingSize = embeddingSize;
     this._contextLength = contextLength;
@@ -164,6 +187,8 @@ class Hyperparameters {
     this._attentionProjectionStandardDeviation = attentionProjectionStandardDeviation;
     this._outputLayerStandardDeviation = outputLayerStandardDeviation;
     this._outputLength = outputLength;
+    this._trainingRatio = trainingRatio;
+    this._numberEpochs = numberEpochs;
     this._seed = seed;
     this._random = Hyperparameters.createRandom(seed);
   }
@@ -210,6 +235,20 @@ class Hyperparameters {
         `VALIDATION_MODE (${Hyperparameters.VALIDATION_MODE}) or ` +
         `GENERATION_MODE (${Hyperparameters.GENERATION_MODE}); got ${mode}`
       );
+    }
+  }
+
+  /**
+   * Checks that a training ratio leaves something in both the training and
+   * the validation set.
+   *
+   * @param trainingRatio - The training ratio to check.
+   * @throws RangeError if trainingRatio is not greater than 0 and less than 1, or is NaN.
+   */
+  private static validateTrainingRatio(trainingRatio: number): void {
+    // Written as a negated range check so that NaN, which fails every comparison, is rejected.
+    if (!(trainingRatio > 0 && trainingRatio < 1)) {
+      throw new RangeError(`Hyperparameters| trainingRatio must be greater than 0 and less than 1; got ${trainingRatio}`);
     }
   }
 
@@ -290,7 +329,9 @@ class Hyperparameters {
     return this._contextLength;
   }
 
+  /** @throws RangeError if contextLength is not a positive whole number. */
   set contextLength(contextLength: number) {
+    Hyperparameters.validatePositiveInteger("contextLength", contextLength);
     this._contextLength = contextLength;
   }
 
@@ -466,6 +507,31 @@ class Hyperparameters {
   set outputLength(outputLength: number) {
     Hyperparameters.validatePositiveInteger("outputLength", outputLength);
     this._outputLength = outputLength;
+  }
+
+  /**
+   * The proportion of the loaded text used for training; the rest is held
+   * back for validation.
+   */
+  get trainingRatio(): number {
+    return this._trainingRatio;
+  }
+
+  /** @throws RangeError if trainingRatio is not greater than 0 and less than 1. */
+  set trainingRatio(trainingRatio: number) {
+    Hyperparameters.validateTrainingRatio(trainingRatio);
+    this._trainingRatio = trainingRatio;
+  }
+
+  /** The number of times training passes over the whole training set. */
+  get numberEpochs(): number {
+    return this._numberEpochs;
+  }
+
+  /** @throws RangeError if numberEpochs is not a positive whole number. */
+  set numberEpochs(numberEpochs: number) {
+    Hyperparameters.validatePositiveInteger("numberEpochs", numberEpochs);
+    this._numberEpochs = numberEpochs;
   }
 
   /**

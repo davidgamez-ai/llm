@@ -22,8 +22,9 @@ class Embedding {
 
   /**
    * Standard deviation of the normal distribution (mean 0) used to
-   * initialize the position embedding matrix. GPT-2's original
-   * implementation uses 0.01 for its position embeddings (wpe).
+   * initialize the position embedding matrix. OpenAI's original GPT-2
+   * TensorFlow code uses 0.01 for its position embeddings (wpe); Hugging
+   * Face's implementation uses 0.02.
    */
   positionEmbeddingStandardDeviation: number;
 
@@ -71,8 +72,11 @@ class Embedding {
    *   normal distribution with mean 0 and standard deviation
    *   tokenEmbeddingStandardDeviation (0.02 by default).
    * - positionEmbeddingMatrix: contextLength x embeddingSize, initialized as
-   *   in GPT-2, with values drawn from a normal distribution with mean 0 and
-   *   standard deviation positionEmbeddingStandardDeviation (0.01 by default).
+   *   in OpenAI's original GPT-2 TensorFlow code (model.py, wpe), with values
+   *   drawn from a normal distribution with mean 0 and standard deviation
+   *   positionEmbeddingStandardDeviation (0.01 by default). Hugging Face's
+   *   GPT2Model._init_weights uses 0.02 for the position embeddings instead,
+   *   the same as for the token embeddings.
    *
    * Random values come from the Hyperparameters' shared stream, so the
    * matrices are reproducible when Hyperparameters.seed is set.
@@ -134,6 +138,7 @@ class Embedding {
    * @param tokenIds - Token ids of already tokenized text, in sequence order.
    * @returns One combined embedding vector per token, in token order. Each vector is the token's textEmbeddingMatrix row plus its positionEmbeddingMatrix row.
    * @throws Error if there are more tokens than contextLength, since the position embedding matrix has no row for positions beyond the context window.
+   * @throws RangeError if any token id is not a whole number from 0 to vocabSize - 1, since the token embedding matrix has no row for it.
    */
   getEmbeddingFromTokens(tokenIds: number[]): number[][] {
     if (tokenIds.length > this.contextLength) {
@@ -141,6 +146,20 @@ class Embedding {
         `Embedding| Sequence of ${tokenIds.length} tokens exceeds the context length of ${this.contextLength}`
       );
     }
+
+    /*
+     * Check every id before looking any up. An id outside the vocabulary
+     * (or a fraction or NaN) has no row in textEmbeddingMatrix, so the
+     * lookup would return undefined and fail later with a confusing
+     * TypeError, far from the cause.
+     */
+    tokenIds.forEach((id, position) => {
+      if (!(Number.isInteger(id) && id >= 0 && id < this.vocabSize)) {
+        throw new RangeError(
+          `Embedding| Token id ${id} at position ${position} is outside the vocabulary (0 to ${this.vocabSize - 1})`
+        );
+      }
+    });
 
     const tokenEmbeddings: number[][] = [];
     const positionEmbeddings: number[][] = [];

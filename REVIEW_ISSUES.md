@@ -87,66 +87,23 @@ Dropout masks matter most, because they are random draws and can't be recalculat
 
 ---
 
-## Phase 3: Training loop
+## Phase 3: Training
 
-### [ ] 8. Bring the training loop into line with the book
+### [ ] 8. Update the weights once per batch
 
-**Where:** [src/Trainer.ts:68-179](src/Trainer.ts#L68-L179)
+**Where:** `Trainer.train()` in [src/Trainer.ts](src/Trainer.ts), at the comment "Once backpropagation has been written…"
 
-**Problem:**
-- Loss is averaged per window, then the window averages are averaged again. The book averages over every token in the batch. The results differ only when the last window is shorter.
-- The last incomplete window is kept. The book drops it (`drop_last=True`).
-- There is no train/validation split. The book uses 90/10.
-- Batches are not shuffled.
+**Needs:** issue 5 (the backward pass).
+
+**Problem:** The training loop already follows the book: a 90/10 split, full windows only, shuffled batches with the incomplete last batch dropped, loss averaged over every token in a batch, and validation loss in `VALIDATION_MODE`. But the weights are never updated, so every epoch gives the same validation loss.
 
 **Fix:**
-- Split the tokens 90/10 into training and validation sets.
-- Drop the incomplete final window.
-- Shuffle the order of the windows on each epoch.
-- Average loss and gradients over every token in a batch of `batchSize` windows, then do one weight update per batch.
-- Calculate the validation loss with `hyperparameters.mode = Hyperparameters.VALIDATION_MODE`. In this mode dropout is off and the model returns logits for every position, so `calculateLoss()` can be reused unchanged.
+- After `calculateBatchLoss()`, zero the gradients, run the backward pass from the batch loss, and update the weights once per batch.
+- The gradient of the batch loss must be averaged over every token in the batch, in the same way as the loss.
+- Add an optimiser. The book uses AdamW with a learning rate of 0.0004 and weight decay of 0.1, so add those as hyperparameters.
+- Once the weights change, raise the default `numberEpochs` from 1 to the book's 10.
 
-**Done when:** each epoch reports training and validation loss, and the weights are updated once per batch.
-
----
-
-### [ ] 9. Generate from token ids instead of re-tokenizing text
-
-**Where:** `Generator.generate()` in [src/Generator.ts](src/Generator.ts)
-
-**Problem:** Each step decodes one token to text, appends it, then re-encodes the whole string. BPE doesn't always give back the same token ids, because new text can merge with the previous token.
-
-**Fix:**
-- Encode the prompt once.
-- Keep a `number[]` of token ids and append each chosen id to it.
-- Feed the last `contextLength` ids to the model at each step.
-- Decode once at the end.
-- This means `Decoder.greedy` should return a token id rather than text.
-
-**Done when:** generation never re-encodes text that has already been encoded.
-
----
-
-## Phase 4: Small fixes and tidy-ups
-
-### [ ] 10. Fix stale comment
-- [src/Embedding.ts:69-75](src/Embedding.ts#L69-L75) says Hugging Face uses 0.01 for position embeddings. Hugging Face uses 0.02; the 0.01 value comes from OpenAI's original TensorFlow code.
-
-### [ ] 11. Check that token ids are in range
-- [src/Embedding.ts:152](src/Embedding.ts#L152): an id outside `0 … vocabSize - 1` returns `undefined`, which later fails with a confusing `TypeError`. Throw a clear `RangeError` instead.
-
-### [ ] 12. Allow `<|endoftext|>` to be encoded
-- [src/BPETokenizer.ts:17-19](src/BPETokenizer.ts#L17-L19): `encode` throws "Disallowed special token found" for text containing `<|endoftext|>`.
-- The book passes `allowed_special={"<|endoftext|>"}`, which you'll need when joining several documents together for training.
-
-### [ ] 13. Remove the unused path in `index.ts`
-- [src/index.ts:6](src/index.ts#L6): `filePath` is computed but never used, and `trainer.load()` is given a relative path. Use `filePath`, or remove it.
-
-### [ ] 14. Validate `contextLength`
-- The `contextLength` setter in [src/Hyperparameters.ts](src/Hyperparameters.ts): the setter and the constructor accept any value. Use `validatePositiveInteger`, like the other numeric hyperparameters.
-
-### [ ] 15. Note on `contextLength` and the parameter count
-- The default `contextLength` of 12 (GPT-2 uses 1024) means the parameter count only matches the book's 163,009,536 when it is set to 1024. Mention this in a comment or test so it doesn't look like a regression.
+**Done when:** the training and validation losses fall over several epochs on `the-verdict.txt`.
 
 ---
 

@@ -1,10 +1,11 @@
-import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
 
 /**
- * Converts the model's output, an array of probabilities with one entry per
- * token in the vocabulary, into text. Each method implements a different
- * strategy for choosing which token to output.
+ * Chooses the next token from the model's output, an array of probabilities
+ * with one entry per token in the vocabulary, and returns the chosen token's
+ * id. Each method implements a different strategy for choosing the token.
+ * Converting ids back into text is left to the caller (e.g. Generator), so
+ * that the generated ids can be decoded together once generation is finished.
  */
 class Decoder {
   /**
@@ -13,9 +14,6 @@ class Decoder {
    * after construction is seen by the decoder.
    */
   private readonly hyperparameters: Hyperparameters;
-
-  /** Converts the chosen token id back into text. */
-  private readonly tokenizer: BPETokenizer = new BPETokenizer();
 
   /** Draws from the Hyperparameters' shared random number stream, used to break ties between tokens. */
   private readonly random: () => number;
@@ -34,15 +32,15 @@ class Decoder {
 
   /**
    * Greedy decoding: picks the token with the highest probability and
-   * returns its text. If several tokens share the highest probability, one
+   * returns its id. If several tokens share the highest probability, one
    * of them is chosen at random.
    *
    * @param probabilities - One probability per token in the vocabulary, indexed by token id. Must be vocabularySize long.
-   * @returns The text of the chosen token.
+   * @returns The id of the chosen token.
    * @throws Error if the hyperparameters are not in generation mode, since text is only generated in that mode.
    * @throws RangeError if probabilities is not vocabularySize long.
    */
-  greedy(probabilities: number[]): string {
+  greedy(probabilities: number[]): number {
     this.validate(probabilities);
 
     /*
@@ -66,8 +64,7 @@ class Decoder {
       throw new RangeError("Decoder| probabilities contains no valid values");
     }
 
-    const tokenId = bestTokenIds[Math.floor(this.random() * bestTokenIds.length)];
-    return this.tokenizer.decode([tokenId]);
+    return bestTokenIds[Math.floor(this.random() * bestTokenIds.length)];
   }
 
   /**

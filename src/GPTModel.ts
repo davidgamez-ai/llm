@@ -137,6 +137,11 @@ class GPTModel {
    * transformer block, the final layer normalization and the linear output
    * layer. Dropout has no parameters.
    *
+   * The count depends on contextLength, because the position embedding has
+   * one row per position. With the default Hyperparameters it only matches
+   * the book's 163,009,536 when contextLength is set to GPT-2's 1024; the
+   * default contextLength of 12 gives 777,216 fewer (162,232,320).
+   *
    * @returns The total number of parameters in the model.
    */
   getParameterCount(): number {

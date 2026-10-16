@@ -8,13 +8,78 @@ const NON_POSITIVE_INTEGERS = [0, -1, 1.5, NaN, Infinity];
 test("unvalidated setters store the new value", () => {
   const hyperparameters = new Hyperparameters();
 
-  hyperparameters.contextLength = 256;
   hyperparameters.qkvBias = true;
   hyperparameters.feedForwardBias = false;
 
-  assert.equal(hyperparameters.contextLength, 256);
   assert.equal(hyperparameters.qkvBias, true);
   assert.equal(hyperparameters.feedForwardBias, false);
+});
+
+test("contextLength setter stores a positive whole number", () => {
+  const hyperparameters = new Hyperparameters();
+
+  hyperparameters.contextLength = 256;
+
+  assert.equal(hyperparameters.contextLength, 256);
+});
+
+test("contextLength setter rejects invalid values and leaves state unchanged", () => {
+  const hyperparameters = new Hyperparameters();
+
+  for (const value of NON_POSITIVE_INTEGERS) {
+    assert.throws(() => { hyperparameters.contextLength = value; }, RangeError, `accepted ${value}`);
+  }
+
+  assert.equal(hyperparameters.contextLength, 12);
+});
+
+test("trainingRatio defaults to 0.9 and numberEpochs to 1", () => {
+  const hyperparameters = new Hyperparameters();
+
+  assert.equal(hyperparameters.trainingRatio, 0.9);
+  assert.equal(hyperparameters.numberEpochs, 1);
+});
+
+test("trainingRatio setter stores values between 0 and 1", () => {
+  const hyperparameters = new Hyperparameters();
+
+  hyperparameters.trainingRatio = 0.75;
+
+  assert.equal(hyperparameters.trainingRatio, 0.75);
+});
+
+test("trainingRatio setter rejects 0, 1, values outside them and NaN, leaving state unchanged", () => {
+  const hyperparameters = new Hyperparameters();
+
+  for (const value of [0, 1, -0.1, 1.1, NaN]) {
+    assert.throws(() => { hyperparameters.trainingRatio = value; }, RangeError, `accepted ${value}`);
+  }
+
+  assert.equal(hyperparameters.trainingRatio, 0.9);
+});
+
+test("numberEpochs setter stores a positive whole number", () => {
+  const hyperparameters = new Hyperparameters();
+
+  hyperparameters.numberEpochs = 10;
+
+  assert.equal(hyperparameters.numberEpochs, 10);
+});
+
+test("numberEpochs setter rejects invalid values and leaves state unchanged", () => {
+  const hyperparameters = new Hyperparameters();
+
+  for (const value of NON_POSITIVE_INTEGERS) {
+    assert.throws(() => { hyperparameters.numberEpochs = value; }, RangeError, `accepted ${value}`);
+  }
+
+  assert.equal(hyperparameters.numberEpochs, 1);
+});
+
+test("constructor rejects an invalid contextLength", () => {
+  for (const value of NON_POSITIVE_INTEGERS) {
+    assert.throws(() => new Hyperparameters(768, value), RangeError, `accepted ${value}`);
+  }
 });
 
 test("mode defaults to TRAINING_MODE", () => {
