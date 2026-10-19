@@ -65,9 +65,13 @@ class LayerNormalization {
 
     const standardDeviation = Math.sqrt(variance + LayerNormalization.epsilon);
 
-    return values.map((value, index) =>
-      this.scale[index] * ((value - mean) / standardDeviation) + this.shift[index]
-    );
+    // Normalize each value, then apply that dimension's own scale and shift.
+    const output: number[] = [];
+    for (let i = 0; i < values.length; i++) {
+      const normalized = (values[i] - mean) / standardDeviation;
+      output.push(this.scale[i] * normalized + this.shift[i]);
+    }
+    return output;
   }
 
   /**

@@ -142,8 +142,8 @@ class Trainer {
         const batches:Window[][] = this.createBatches(this.shuffle(trainingWindows), true);
 
         let totalBatchLoss:number = 0;
-        batches.forEach((batch:Window[], batchIndex:number) => {
-          const batchLoss:number = this.calculateBatchLoss(batch);
+        for (let batchIndex:number = 0; batchIndex < batches.length; batchIndex++) {
+          const batchLoss:number = this.calculateBatchLoss(batches[batchIndex]);
           totalBatchLoss += batchLoss;
 
           /*
@@ -154,7 +154,7 @@ class Trainer {
           if (DEBUG.TRAINER) {
             console.log(`Trainer| Epoch ${epoch}. Batch ${batchIndex + 1} of ${batches.length}. Loss: ${batchLoss}.`);
           }
-        });
+        }
 
         const epochLoss:EpochLoss = {
           epoch,
@@ -315,7 +315,9 @@ class Trainer {
     const logits:number[][] = this.model.calculate(inputs);
 
     let totalLoss:number = 0;
-    logits.forEach((row:number[], position:number) => {
+    for (let position:number = 0; position < logits.length; position++) {
+      const row:number[] = logits[position];
+
       /*
        * The model returns logits rather than probabilities, so the log probability of
        * the target is found with a log-softmax: logit[target] minus the log
@@ -332,7 +334,7 @@ class Trainer {
       if (DEBUG.TRAINER && DEBUG.VERBOSE) {
         console.log(`Trainer| Position ${position}. Total loss: ${totalLoss}`);
       }
-    });
+    }
 
     return totalLoss;
   }

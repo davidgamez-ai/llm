@@ -60,12 +60,13 @@ class Matrix {
     const rows: number = values.length;
     const columns: number = rows > 0 ? values[0].length : 0;
     const matrix = new Matrix(rows, columns);
-    values.forEach((row: number[], rowIndex: number) => {
-      if (row.length !== columns) {
-        throw new RangeError(`Matrix| Row ${rowIndex} has ${row.length} values; expected ${columns}`);
+    for (let row = 0; row < rows; row++) {
+      if (values[row].length !== columns) {
+        throw new RangeError(`Matrix| Row ${row} has ${values[row].length} values; expected ${columns}`);
       }
-      matrix.data.set(row, rowIndex * columns);
-    });
+      // Copy the row into its place in data: row r starts at index r * columns.
+      matrix.data.set(values[row], row * columns);
+    }
     return matrix;
   }
 
@@ -146,7 +147,10 @@ export function vectorTimesMatrix(vector: ArrayLike<number>, matrix: Matrix, bia
   }
 
   // Start from the biases, or from 0 when there are none.
-  const result: number[] = Array.from({ length: matrix.columns }, (_, column: number) => (hasBiases ? biases![column] : 0));
+  const result: number[] = [];
+  for (let column = 0; column < matrix.columns; column++) {
+    result.push(hasBiases ? biases![column] : 0);
+  }
 
   for (let row = 0; row < matrix.rows; row++) {
     const value: number = vector[row];

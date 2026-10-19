@@ -50,14 +50,15 @@ class Decoder {
      */
     let highestProbability = -Infinity;
     let bestTokenIds: number[] = [];
-    probabilities.forEach((probability, tokenId) => {
+    for (let tokenId = 0; tokenId < probabilities.length; tokenId++) {
+      const probability = probabilities[tokenId];
       if (probability > highestProbability) {
         highestProbability = probability;
         bestTokenIds = [tokenId];
       } else if (probability === highestProbability) {
         bestTokenIds.push(tokenId);
       }
-    });
+    }
 
     // bestTokenIds is empty only if every value is NaN, which fails every comparison.
     if (bestTokenIds.length === 0) {

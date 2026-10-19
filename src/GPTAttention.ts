@@ -184,16 +184,28 @@ class GPTAttention {
       console.table(values);
     }
 
+    const tokenCount: number = embeddings.length;
+
     /*
      * For each token, take the dot product of its query vector with the key
      * vector of every token in the sequence (including itself). The result
      * is a tokenCount x tokenCount matrix in which row i holds the attention
      * scores of token i, i.e. how strongly token i's query matches each
-     * token's key.
+     * token's key:
+     *
+     *     score[i][j] = sum over d of query[i][d] * key[j][d]
      */
-    const attentionScores: number[][] = queries.map((query) =>
-      keys.map((key) => query.reduce((sum, value, index) => sum + value * key[index], 0))
-    );
+    const attentionScores: number[][] = [];
+    for (let i = 0; i < tokenCount; i++) {
+      attentionScores.push([]);
+      for (let j = 0; j < tokenCount; j++) {
+        let dotProduct = 0;
+        for (let d = 0; d < this.weightMatrixColumns; d++) {
+          dotProduct += queries[i][d] * keys[j][d];
+        }
+        attentionScores[i].push(dotProduct);
+      }
+    }
 
     if(DEBUG.ATTENTION) {
       console.log("GPTAttention| Attention scores (row = query token, column = key token):");
@@ -214,9 +226,14 @@ class GPTAttention {
      * afterwards.
      */
     const scale = Math.sqrt(this.weightMatrixColumns);
-    const maskedScores: number[][] = attentionScores.map((row, rowIndex) =>
-      row.map((score, columnIndex) => (columnIndex <= rowIndex ? score / scale : -Infinity))
-    );
+    const maskedScores: number[][] = [];
+    for (let i = 0; i < tokenCount; i++) {
+      maskedScores.push([]);
+      for (let j = 0; j < tokenCount; j++) {
+        // Token i may attend to token j only if j is not after i.
+        maskedScores[i].push(j <= i ? attentionScores[i][j] / scale : -Infinity);
+      }
+    }
 
     if(DEBUG.ATTENTION) {
       console.log("GPTAttention| Scaled and causally masked attention scores (-Infinity = masked):");
@@ -280,9 +297,13 @@ class GPTAttention {
        * element with the dropout mask. Dropped weights become 0 and kept
        * weights are scaled by 1 / (1 - dropoutRate).
        */
-      finalAttentionWeights = attentionWeights.map((row, rowIndex) =>
-        row.map((weight, columnIndex) => weight * dropoutMask[rowIndex][columnIndex])
-      );
+      finalAttentionWeights = [];
+      for (let i = 0; i < tokenCount; i++) {
+        finalAttentionWeights.push([]);
+        for (let j = 0; j < tokenCount; j++) {
+          finalAttentionWeights[i].push(attentionWeights[i][j] * dropoutMask[i][j]);
+        }
+      }
 
       if(DEBUG.ATTENTION) console.log("GPTAttention| Final attention weights (after causal mask and dropout):");
     } else {
@@ -300,13 +321,21 @@ class GPTAttention {
      * that token and the tokens before it, in which the tokens it attends to
      * most contribute most. Later tokens and dropped weights are zero, so
      * they do not contribute. Collecting these gives a tokenCount x
-     * weightMatrixColumns matrix.
+     * weightMatrixColumns matrix:
+     *
+     *     context[i][d] = sum over j of weight[i][j] * value[j][d]
      */
-    const contextVectors: number[][] = finalAttentionWeights.map((weights) =>
-      Array.from({ length: this.weightMatrixColumns }, (_, column) =>
-        weights.reduce((sum, weight, token) => sum + weight * values[token][column], 0)
-      )
-    );
+    const contextVectors: number[][] = [];
+    for (let i = 0; i < tokenCount; i++) {
+      contextVectors.push([]);
+      for (let d = 0; d < this.weightMatrixColumns; d++) {
+        let sum = 0;
+        for (let j = 0; j < tokenCount; j++) {
+          sum += finalAttentionWeights[i][j] * values[j][d];
+        }
+        contextVectors[i].push(sum);
+      }
+    }
 
     if(DEBUG.CONTEXT) {
       console.log("GPTAttention| Context vectors (one row per token):");

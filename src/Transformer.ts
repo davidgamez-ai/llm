@@ -107,9 +107,7 @@ class Transformer {
      * means attention only has to learn a change to each embedding rather
      * than a complete replacement for it.
      */
-    const shortcutOutput = droppedAttentionOutput.map((vector, token) =>
-      vector.map((value, index) => value + embeddings[token][index])
-    );
+    const shortcutOutput = this.add(droppedAttentionOutput, embeddings);
 
     // Normalize each shortcut output vector independently before the feed forward network.
     const normalizedShortcutOutput = shortcutOutput.map((vector) => this.feedForwardLayerNormalization.calculate(vector));
@@ -127,9 +125,7 @@ class Transformer {
      * input to its output, so the feed forward network only has to learn a
      * change to each token vector.
      */
-    const output = droppedFeedForwardOutput.map((vector, token) =>
-      vector.map((value, index) => value + shortcutOutput[token][index])
-    );
+    const output = this.add(droppedFeedForwardOutput, shortcutOutput);
 
     if (DEBUG.TRANSFORMER) {
       console.log("Transformer| Output (one row per token):");
@@ -137,6 +133,25 @@ class Transformer {
     }
 
     return output;
+  }
+
+  /**
+   * Adds two matrices of token vectors element by element, as a shortcut
+   * connection does: output[token][index] = first[token][index] + second[token][index].
+   *
+   * @param first - One row per token, each row embeddingSize values wide.
+   * @param second - The same shape as first.
+   * @returns A new matrix of the same shape holding the sums.
+   */
+  private add(first: number[][], second: number[][]): number[][] {
+    const sum: number[][] = [];
+    for (let token = 0; token < first.length; token++) {
+      sum.push([]);
+      for (let index = 0; index < first[token].length; index++) {
+        sum[token].push(first[token][index] + second[token][index]);
+      }
+    }
+    return sum;
   }
 
   /**

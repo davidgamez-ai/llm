@@ -109,9 +109,14 @@ class MultiHeadAttention {
      * context vectors that every head produced for that token into a
      * single row, in head order.
      */
-    const contextVectors: number[][] = embeddings.map((_, token) =>
-      headContextVectors.flatMap((headVectors) => headVectors[token])
-    );
+    const contextVectors: number[][] = [];
+    for (let token = 0; token < embeddings.length; token++) {
+      const concatenated: number[] = [];
+      for (const headVectors of headContextVectors) {
+        concatenated.push(...headVectors[token]);
+      }
+      contextVectors.push(concatenated);
+    }
 
     /*
      * Check that every concatenated context vector is embeddingSize wide,
@@ -119,16 +124,17 @@ class MultiHeadAttention {
      * of the same width as the embeddings. Mismatches are always logged;
      * success is only logged when attention debugging is on.
      */
-    const wrongLengthTokens = contextVectors
-      .map((vector, token) => ({ token, length: vector.length }))
-      .filter(({ length }) => length !== this.embeddingSize);
-    if (wrongLengthTokens.length > 0) {
-      wrongLengthTokens.forEach(({ token, length }) =>
+    let allCorrectLength = true;
+    for (let token = 0; token < contextVectors.length; token++) {
+      if (contextVectors[token].length !== this.embeddingSize) {
+        allCorrectLength = false;
         console.error(
-          `MultiHeadAttention| Context vector for token ${token} has length ${length}; expected embeddingSize ${this.embeddingSize}.`
-        )
-      );
-    } else if (DEBUG.ATTENTION) {
+          `MultiHeadAttention| Context vector for token ${token} has length ${contextVectors[token].length}; ` +
+          `expected embeddingSize ${this.embeddingSize}.`
+        );
+      }
+    }
+    if (allCorrectLength && DEBUG.ATTENTION) {
       console.log(`MultiHeadAttention| All context vectors have length embeddingSize (${this.embeddingSize}).`);
     }
 

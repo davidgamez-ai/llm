@@ -140,13 +140,14 @@ class Embedding {
      * lookup would return undefined and fail later with a confusing
      * TypeError, far from the cause.
      */
-    tokenIds.forEach((id, position) => {
+    for (let position = 0; position < tokenIds.length; position++) {
+      const id = tokenIds[position];
       if (!(Number.isInteger(id) && id >= 0 && id < this.vocabSize)) {
         throw new RangeError(
           `Embedding| Token id ${id} at position ${position} is outside the vocabulary (0 to ${this.vocabSize - 1})`
         );
       }
-    });
+    }
 
     // The token and position embedding rows are views onto the matrices, not copies.
     const tokenEmbeddings: Float32Array[] = [];

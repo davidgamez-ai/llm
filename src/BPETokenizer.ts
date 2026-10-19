@@ -72,9 +72,14 @@ class BPETokenizer {
     const pieces: string[] = text.split(EndOfText);
 
     // Encode each piece, inserting END_OF_TEXT_ID before every piece except the first.
-    return pieces.flatMap((piece: string, index: number) =>
-      index === 0 ? encode(piece) : [BPETokenizer.END_OF_TEXT_ID, ...encode(piece)]
-    );
+    const ids: number[] = [];
+    for (let i = 0; i < pieces.length; i++) {
+      if (i > 0) {
+        ids.push(BPETokenizer.END_OF_TEXT_ID);
+      }
+      ids.push(...encode(pieces[i]));
+    }
+    return ids;
   }
 
   /**
