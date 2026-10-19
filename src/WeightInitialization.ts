@@ -11,6 +11,8 @@
  * - Layer normalization scale starts at 1 and shift at 0.
  */
 
+import Matrix from "./Matrix.js";
+
 /**
  * Draws one sample from a normal distribution with mean 0 and the given
  * standard deviation, using the Box-Muller transform to turn two uniform
@@ -42,10 +44,12 @@ export function randomNormalMatrix(
   columns: number,
   standardDeviation: number,
   random: () => number
-): number[][] {
-  return Array.from({ length: rows }, () =>
-    Array.from({ length: columns }, () => randomNormal(random, standardDeviation))
-  );
+): Matrix {
+  const matrix = new Matrix(rows, columns);
+  for (let i = 0; i < matrix.size; i++) {
+    matrix.data[i] = randomNormal(random, standardDeviation);
+  }
+  return matrix;
 }
 
 /**

@@ -1,5 +1,6 @@
 import Hyperparameters from "./Hyperparameters.js";
 import { randomNormalMatrix } from "./WeightInitialization.js";
+import Matrix, { matrixTimesVector } from "./Matrix.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -35,7 +36,7 @@ class LinearOutputLayer {
   standardDeviation: number;
 
   /** The weight matrix built by build(): vocabSize rows by embeddingSize columns. */
-  weights: number[][] = [];
+  weights: Matrix = new Matrix(0, 0);
 
   /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
   private readonly random: () => number;
@@ -79,7 +80,7 @@ class LinearOutputLayer {
     this.weights = randomNormalMatrix(this.vocabSize, this.embeddingSize, this.standardDeviation, this.random);
 
     if (DEBUG.LINEAR_OUTPUT_LAYER) console.log(
-      `LinearOutputLayer| Weight matrix built. Rows: ${this.weights.length}; columns: ${this.weights[0].length}`
+      `LinearOutputLayer| Weight matrix built. Rows: ${this.weights.rows}; columns: ${this.weights.columns}`
     );
   }
 
@@ -103,11 +104,8 @@ class LinearOutputLayer {
   calculate(embeddings: number[][]): number[][] {
     const selectedEmbeddings = this.mode === Hyperparameters.GENERATION_MODE ? embeddings.slice(-1) : embeddings;
 
-    const logits = selectedEmbeddings.map((embedding) =>
-      this.weights.map((weightRow) =>
-        weightRow.reduce((sum, weight, index) => sum + weight * embedding[index], 0)
-      )
-    );
+    // weights has one row per vocabulary token, so each logit is one row of weights dotted with the embedding.
+    const logits = selectedEmbeddings.map((embedding) => matrixTimesVector(this.weights, embedding));
 
     // Print the whole output in verbose mode; otherwise just its dimensions.
     if (DEBUG.LINEAR_OUTPUT_LAYER) {
@@ -130,7 +128,7 @@ class LinearOutputLayer {
    * @returns The total number of weights currently stored in weights.
    */
   getParameterCount(): number {
-    return this.weights.reduce((sum, row) => sum + row.length, 0);
+    return this.weights.size;
   }
 }
 

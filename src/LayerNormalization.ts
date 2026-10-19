@@ -19,10 +19,10 @@ class LayerNormalization {
   embeddingSize: number;
 
   /** Trainable scale (gamma), multiplied into each normalized value: embeddingSize values, initialized to 1. */
-  scale: number[];
+  scale: Float32Array;
 
   /** Trainable shift (beta), added to each scaled value: embeddingSize values, initialized to 0. */
-  shift: number[];
+  shift: Float32Array;
 
   /**
    * Creates a LayerNormalization, copying embeddingSize from the given
@@ -33,8 +33,9 @@ class LayerNormalization {
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.embeddingSize = hyperparameters.embeddingSize;
-    this.scale = new Array(this.embeddingSize).fill(1);
-    this.shift = new Array(this.embeddingSize).fill(0);
+    this.scale = new Float32Array(this.embeddingSize).fill(1);
+    // A new Float32Array is filled with zeros, so the shift starts at 0.
+    this.shift = new Float32Array(this.embeddingSize);
   }
 
   /**

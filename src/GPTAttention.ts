@@ -1,5 +1,6 @@
 import Hyperparameters from "./Hyperparameters.js";
 import { randomNormalMatrix } from "./WeightInitialization.js";
+import Matrix, { vectorTimesMatrix } from "./Matrix.js";
 import DEBUG from "./Debug.js"
 
 /**
@@ -33,25 +34,25 @@ class GPTAttention {
   private readonly getMode: () => number;
 
   /** The query weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
-  queryWeights: number[][] = [];
+  queryWeights: Matrix = new Matrix(0, 0);
 
   /** The key weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
-  keyWeights: number[][] = [];
+  keyWeights: Matrix = new Matrix(0, 0);
 
   /** The value weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
-  valueWeights: number[][] = [];
+  valueWeights: Matrix = new Matrix(0, 0);
 
   /** True if the query, key and value projections add a bias to their outputs; false if they do not. */
   qkvBias: boolean;
 
   /** Query biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
-  queryBiases: number[] = [];
+  queryBiases: Float32Array = new Float32Array(0);
 
   /** Key biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
-  keyBiases: number[] = [];
+  keyBiases: Float32Array = new Float32Array(0);
 
   /** Value biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
-  valueBiases: number[] = [];
+  valueBiases: Float32Array = new Float32Array(0);
 
   /** Standard deviation of the normal distribution (mean 0) used to initialize the weight matrices. GPT-2 uses 0.02. */
   standardDeviation: number;
@@ -99,9 +100,11 @@ class GPTAttention {
     this.keyWeights = randomNormalMatrix(this.embeddingSize, this.weightMatrixColumns, this.standardDeviation, this.random);
     this.valueWeights = randomNormalMatrix(this.embeddingSize, this.weightMatrixColumns, this.standardDeviation, this.random);
 
-    this.queryBiases = this.qkvBias ? new Array(this.weightMatrixColumns).fill(0) : [];
-    this.keyBiases = this.qkvBias ? new Array(this.weightMatrixColumns).fill(0) : [];
-    this.valueBiases = this.qkvBias ? new Array(this.weightMatrixColumns).fill(0) : [];
+    // A new Float32Array is filled with zeros, so the biases start at 0.
+    const biasLength: number = this.qkvBias ? this.weightMatrixColumns : 0;
+    this.queryBiases = new Float32Array(biasLength);
+    this.keyBiases = new Float32Array(biasLength);
+    this.valueBiases = new Float32Array(biasLength);
 
     if(DEBUG.QKV) console.log(
       `GPTAttention| Weight matrices built. Rows: ${this.embeddingSize}; columns: ${this.weightMatrixColumns}`
@@ -112,11 +115,11 @@ class GPTAttention {
     // comma-separated string that logging a nested array directly produces.
     if(DEBUG.QKV) {
       console.log("GPTAttention| Query weights:");
-      console.table(this.queryWeights);
+      console.table(this.queryWeights.toArrays());
       console.log("GPTAttention| Key weights:");
-      console.table(this.keyWeights);
+      console.table(this.keyWeights.toArrays());
       console.log("GPTAttention| Value weights:");
-      console.table(this.valueWeights);
+      console.table(this.valueWeights.toArrays());
     }
   }
 
@@ -146,33 +149,23 @@ class GPTAttention {
       `GPTAttention| Calculating queries, keys and values for ${embeddings.length} tokens.`
     );
 
-    /*
-     * Multiplies a single embedding vector by a weight matrix and adds a
-     * bias: each column of the result is the dot product of the vector with
-     * that column of the matrix, plus that column's bias when qkvBias is
-     * true. A 1 x embeddingSize vector times an embeddingSize x
-     * weightMatrixColumns matrix produces a 1 x weightMatrixColumns vector.
-     */
-    const multiplyVectorByMatrix = (vector: number[], matrix: number[][], biases: number[]): number[] =>
-      Array.from({ length: this.weightMatrixColumns }, (_, column) =>
-        vector.reduce(
-          (sum, value, row) => sum + value * matrix[row][column],
-          this.qkvBias ? biases[column] : 0
-        )
-      );
-
     const queries: number[][] = [];
     const keys: number[][] = [];
     const values: number[][] = [];
 
-    // For each token in turn, project its embedding vector into its query,
-    // key and value vectors using the three weight matrices.
+    /*
+     * For each token in turn, project its embedding vector into its query,
+     * key and value vectors by multiplying it by the three weight matrices
+     * and adding the biases (which are empty when qkvBias is false). A
+     * 1 x embeddingSize vector times an embeddingSize x weightMatrixColumns
+     * matrix produces a 1 x weightMatrixColumns vector.
+     */
     for (let i = 0; i < embeddings.length; i++) {
       const embedding = embeddings[i];
 
-      const query = multiplyVectorByMatrix(embedding, this.queryWeights, this.queryBiases);
-      const key = multiplyVectorByMatrix(embedding, this.keyWeights, this.keyBiases);
-      const value = multiplyVectorByMatrix(embedding, this.valueWeights, this.valueBiases);
+      const query = vectorTimesMatrix(embedding, this.queryWeights, this.queryBiases);
+      const key = vectorTimesMatrix(embedding, this.keyWeights, this.keyBiases);
+      const value = vectorTimesMatrix(embedding, this.valueWeights, this.valueBiases);
 
       queries.push(query);
       keys.push(key);
@@ -331,11 +324,8 @@ class GPTAttention {
    * @returns The total number of weights and biases currently stored on the instance.
    */
   getParameterCount(): number {
-    const countMatrix = (matrix: number[][]): number =>
-      matrix.reduce((sum, row) => sum + row.length, 0);
-
     return (
-      countMatrix(this.queryWeights) + countMatrix(this.keyWeights) + countMatrix(this.valueWeights) +
+      this.queryWeights.size + this.keyWeights.size + this.valueWeights.size +
       this.queryBiases.length + this.keyBiases.length + this.valueBiases.length
     );
   }

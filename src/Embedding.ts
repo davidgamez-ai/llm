@@ -1,6 +1,7 @@
 import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
 import { randomNormalMatrix } from "./WeightInitialization.js";
+import Matrix from "./Matrix.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -38,12 +39,12 @@ class Embedding {
 
   // The token embedding matrix built by build(): one row per vocabulary
   // token, each row embeddingSize values wide. Looked up by token id.
-  private textEmbeddingMatrix: number[][] = [];
+  private textEmbeddingMatrix: Matrix = new Matrix(0, 0);
 
   // The position embedding matrix built by build(): one row per position in
   // the context window (contextLength rows), each row embeddingSize values
   // wide. Looked up by a token's position in the sequence rather than by its id.
-  private positionEmbeddingMatrix: number[][] = [];
+  private positionEmbeddingMatrix: Matrix = new Matrix(0, 0);
 
   /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
   private readonly random: () => number;
@@ -94,10 +95,10 @@ class Embedding {
 
     if(DEBUG.EMBEDDING) {
       console.log(
-        `Embeddings| Token embedding matrix built. Rows: ${this.textEmbeddingMatrix.length}; columns: ${this.textEmbeddingMatrix[0].length}`
+        `Embeddings| Token embedding matrix built. Rows: ${this.textEmbeddingMatrix.rows}; columns: ${this.textEmbeddingMatrix.columns}`
       );
       console.log(
-        `Embeddings| Position embedding matrix built. Rows: ${this.positionEmbeddingMatrix.length}; columns: ${this.positionEmbeddingMatrix[0].length}`
+        `Embeddings| Position embedding matrix built. Rows: ${this.positionEmbeddingMatrix.rows}; columns: ${this.positionEmbeddingMatrix.columns}`
       );
     }
   }
@@ -147,19 +148,20 @@ class Embedding {
       }
     });
 
-    const tokenEmbeddings: number[][] = [];
-    const positionEmbeddings: number[][] = [];
+    // The token and position embedding rows are views onto the matrices, not copies.
+    const tokenEmbeddings: Float32Array[] = [];
+    const positionEmbeddings: Float32Array[] = [];
     const combinedEmbeddings: number[][] = [];
 
     for (let position = 0; position < tokenIds.length; position++) {
       // Look up the current token's row in the text embedding matrix, by id.
       const id = tokenIds[position];
-      const tokenEmbedding = this.textEmbeddingMatrix[id];
+      const tokenEmbedding = this.textEmbeddingMatrix.getRow(id);
       tokenEmbeddings.push(tokenEmbedding);
 
       // Look up this token's row in the position embedding matrix, by its
       // position in the sequence rather than by its id.
-      const positionEmbedding = this.positionEmbeddingMatrix[position];
+      const positionEmbedding = this.positionEmbeddingMatrix.getRow(position);
       positionEmbeddings.push(positionEmbedding);
 
       // Combine the token embedding and position embedding element-wise so
@@ -192,11 +194,7 @@ class Embedding {
    * @returns The total number of values currently stored in textEmbeddingMatrix and positionEmbeddingMatrix.
    */
   getParameterCount(): number {
-    const countMatrix = (matrix: number[][]): number =>
-      matrix.reduce((sum, row) => sum + row.length, 0);
-
-    return countMatrix(this.textEmbeddingMatrix) 
-    + countMatrix(this.positionEmbeddingMatrix);
+    return this.textEmbeddingMatrix.size + this.positionEmbeddingMatrix.size;
   }
 
   /**
@@ -205,14 +203,16 @@ class Embedding {
    * dimensions are printed, which keeps the output short for large arrays.
    *
    * @param label - Name of the array, printed before its contents or dimensions.
-   * @param array - The array to log: a vector, or a matrix with one row per token.
+   * @param array - The array to log: a vector, or one row per token. Rows may be Float32Arrays (rows of a Matrix).
    */
-  private logArray(label: string, array: number[] | number[][]): void {
+  private logArray(label: string, array: number[] | ArrayLike<number>[]): void {
+    const isTwoDimensional: boolean = typeof array[0] === "object";
     if (DEBUG.VERBOSE) {
       console.log(`Embedding| ${label}:`);
-      console.table(array);
-    } else if (Array.isArray(array[0])) {
-      console.log(`Embedding| ${label}. Rows: ${array.length}; columns: ${array[0].length}`);
+      // Convert Float32Array rows to plain arrays so console.table lays them out as a grid.
+      console.table(isTwoDimensional ? (array as ArrayLike<number>[]).map((row) => Array.from(row)) : array);
+    } else if (isTwoDimensional) {
+      console.log(`Embedding| ${label}. Rows: ${array.length}; columns: ${(array[0] as ArrayLike<number>).length}`);
     } else {
       console.log(`Embedding| ${label}. Length: ${array.length}`);
     }

@@ -1,5 +1,6 @@
 import Hyperparameters from "./Hyperparameters.js";
 import { randomNormalMatrix, residualProjectionStandardDeviation } from "./WeightInitialization.js";
+import Matrix, { vectorTimesMatrix } from "./Matrix.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -28,16 +29,16 @@ class FeedForward {
   bias: boolean;
 
   /** First linear layer weights built by build(): embeddingSize rows by hiddenSize columns. */
-  firstLayerWeights: number[][] = [];
+  firstLayerWeights: Matrix = new Matrix(0, 0);
 
   /** First linear layer biases built by build(): one per hidden unit, hiddenSize values. Empty when bias is false. */
-  firstLayerBiases: number[] = [];
+  firstLayerBiases: Float32Array = new Float32Array(0);
 
   /** Second linear layer weights built by build(): hiddenSize rows by embeddingSize columns. */
-  secondLayerWeights: number[][] = [];
+  secondLayerWeights: Matrix = new Matrix(0, 0);
 
   /** Second linear layer biases built by build(): one per output unit, embeddingSize values. Empty when bias is false. */
-  secondLayerBiases: number[] = [];
+  secondLayerBiases: Float32Array = new Float32Array(0);
 
   /** Standard deviation for linear layer weights (0.02 in GPT-2); the second layer uses it scaled by 1 / sqrt(2 * numberTransformerBlocks). */
   linearLayerStandardDeviation: number;
@@ -94,8 +95,9 @@ class FeedForward {
 
     this.firstLayerWeights = randomNormalMatrix(this.embeddingSize, this.hiddenSize, this.linearLayerStandardDeviation, this.random);
     this.secondLayerWeights = randomNormalMatrix(this.hiddenSize, this.embeddingSize, secondLayerStandardDeviation, this.random);
-    this.firstLayerBiases = this.bias ? new Array(this.hiddenSize).fill(0) : [];
-    this.secondLayerBiases = this.bias ? new Array(this.embeddingSize).fill(0) : [];
+    // A new Float32Array is filled with zeros, so the biases start at 0.
+    this.firstLayerBiases = new Float32Array(this.bias ? this.hiddenSize : 0);
+    this.secondLayerBiases = new Float32Array(this.bias ? this.embeddingSize : 0);
 
     if (DEBUG.FEED_FORWARD) {
       console.log(
@@ -103,9 +105,9 @@ class FeedForward {
         `hidden: ${this.hiddenSize}; output: ${this.embeddingSize}`
       );
       console.log("FeedForward| First layer weights:");
-      console.table(this.firstLayerWeights);
+      console.table(this.firstLayerWeights.toArrays());
       console.log("FeedForward| Second layer weights:");
-      console.table(this.secondLayerWeights);
+      console.table(this.secondLayerWeights.toArrays());
     }
   }
 
@@ -118,20 +120,6 @@ class FeedForward {
    */
   calculate(token: number[]): number[] {
     /*
-     * A linear layer applied to a single vector: each output value is the
-     * dot product of the vector with one column of the weight matrix, plus
-     * that column's bias when bias is true. The dot product starts from the
-     * bias, or from 0 when there is no bias.
-     */
-    const linear = (vector: number[], weights: number[][], biases: number[]): number[] =>
-      weights[0].map((_, column) =>
-        vector.reduce(
-          (sum, value, row) => sum + value * weights[row][column],
-          this.bias ? biases[column] : 0
-        )
-      );
-
-    /*
      * GELU using the tanh approximation from the original GPT-2 code:
      * 0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3))).
      * Unlike ReLU it is smooth and lets small negative values through,
@@ -140,8 +128,14 @@ class FeedForward {
     const gelu = (x: number): number =>
       0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x ** 3)));
 
-    const hidden = linear(token, this.firstLayerWeights, this.firstLayerBiases).map(gelu);
-    const output = linear(hidden, this.secondLayerWeights, this.secondLayerBiases);
+    /*
+     * Each linear layer multiplies the vector by its weight matrix and adds
+     * its biases (which are empty when bias is false): each output value is
+     * the dot product of the vector with one column of the weight matrix,
+     * plus that column's bias.
+     */
+    const hidden = vectorTimesMatrix(token, this.firstLayerWeights, this.firstLayerBiases).map(gelu);
+    const output = vectorTimesMatrix(hidden, this.secondLayerWeights, this.secondLayerBiases);
 
     if (DEBUG.FEED_FORWARD) {
       console.log("FeedForward| Output:");
@@ -159,13 +153,10 @@ class FeedForward {
    * @returns The total number of weights and biases currently stored on the instance.
    */
   getParameterCount(): number {
-    const countMatrix = (matrix: number[][]): number =>
-      matrix.reduce((sum, row) => sum + row.length, 0);
-
     return (
-      countMatrix(this.firstLayerWeights) +
+      this.firstLayerWeights.size +
       this.firstLayerBiases.length +
-      countMatrix(this.secondLayerWeights) +
+      this.secondLayerWeights.size +
       this.secondLayerBiases.length
     );
   }

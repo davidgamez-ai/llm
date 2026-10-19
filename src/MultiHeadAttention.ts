@@ -1,6 +1,7 @@
 import Hyperparameters from "./Hyperparameters.js";
 import GPTAttention from "./GPTAttention.js";
 import { randomNormalMatrix, residualProjectionStandardDeviation } from "./WeightInitialization.js";
+import Matrix, { vectorTimesMatrix } from "./Matrix.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -26,10 +27,10 @@ class MultiHeadAttention {
   linearLayerStandardDeviation: number;
 
   /** Output projection weights built by build(): embeddingSize rows by embeddingSize columns. */
-  outputProjectionWeights: number[][] = [];
+  outputProjectionWeights: Matrix = new Matrix(0, 0);
 
   /** Output projection biases built by build(): embeddingSize values. */
-  outputProjectionBiases: number[] = [];
+  outputProjectionBiases: Float32Array = new Float32Array(0);
 
   /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
   private readonly random: () => number;
@@ -74,7 +75,8 @@ class MultiHeadAttention {
     const standardDeviation = residualProjectionStandardDeviation(this.linearLayerStandardDeviation, this.numberTransformerBlocks);
 
     this.outputProjectionWeights = randomNormalMatrix(this.embeddingSize, this.embeddingSize, standardDeviation, this.random);
-    this.outputProjectionBiases = new Array(this.embeddingSize).fill(0);
+    // A new Float32Array is filled with zeros, so the biases start at 0.
+    this.outputProjectionBiases = new Float32Array(this.embeddingSize);
 
     if (DEBUG.ATTENTION) console.log(
       `MultiHeadAttention| Output projection built. Rows: ${this.embeddingSize}; columns: ${this.embeddingSize}; ` +
@@ -136,14 +138,12 @@ class MultiHeadAttention {
     }
 
     /*
-     * Output projection: each output value is the dot product of the
-     * concatenated context vector with one column of
-     * outputProjectionWeights, plus that column's bias.
+     * Output projection: a linear layer applied to each concatenated context
+     * vector. Each output value is the dot product of the vector with one
+     * column of outputProjectionWeights, plus that column's bias.
      */
     const projectedVectors: number[][] = contextVectors.map((vector) =>
-      this.outputProjectionBiases.map((bias, column) =>
-        vector.reduce((sum, value, row) => sum + value * this.outputProjectionWeights[row][column], bias)
-      )
+      vectorTimesMatrix(vector, this.outputProjectionWeights, this.outputProjectionBiases)
     );
 
     if (DEBUG.CONTEXT) {
@@ -163,8 +163,7 @@ class MultiHeadAttention {
    */
   getParameterCount(): number {
     const headParameters = this.attentionHeads.reduce((sum, head) => sum + head.getParameterCount(), 0);
-    const projectionWeights = this.outputProjectionWeights.reduce((sum, row) => sum + row.length, 0);
-    return headParameters + projectionWeights + this.outputProjectionBiases.length;
+    return headParameters + this.outputProjectionWeights.size + this.outputProjectionBiases.length;
   }
 }
 

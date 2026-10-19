@@ -4,10 +4,20 @@ import Hyperparameters from "../Hyperparameters.js";
 import GPTModel from "../GPTModel.js";
 import createSeededRandom from "../SeededRandom.js";
 import { randomNormal, randomNormalMatrix, residualProjectionStandardDeviation } from "../WeightInitialization.js";
+import Matrix from "../Matrix.js";
 
-/** The mean and standard deviation of every value in a vector or matrix. */
-const statistics = (values: number[] | number[][]): { mean: number; standardDeviation: number } => {
-  const flat: number[] = values.flat();
+/** Weights to check: matrices, Float32Arrays (e.g. biases) or plain arrays, or a list of them. */
+type Weights = Matrix | ArrayLike<number>;
+
+/** Gathers every value from one or more matrices or vectors into one plain array. */
+const allValues = (weights: Weights | Weights[]): number[] =>
+  (Array.isArray(weights) ? weights : [weights]).flatMap((item: Weights) =>
+    Array.from(item instanceof Matrix ? item.data : item)
+  );
+
+/** The mean and standard deviation of every value in one or more matrices or vectors. */
+const statistics = (weights: Weights | Weights[]): { mean: number; standardDeviation: number } => {
+  const flat: number[] = allValues(weights);
   const mean: number = flat.reduce((sum, value) => sum + value, 0) / flat.length;
   const variance: number = flat.reduce((sum, value) => sum + (value - mean) ** 2, 0) / flat.length;
   return { mean, standardDeviation: Math.sqrt(variance) };
@@ -19,8 +29,8 @@ const statistics = (values: number[] | number[][]): { mean: number; standardDevi
  * deviation. The matrices tested have thousands of values, so a correct
  * initialization is far inside these limits.
  */
-const assertNormal = (values: number[][], expectedStandardDeviation: number, label: string): void => {
-  const { mean, standardDeviation } = statistics(values);
+const assertNormal = (weights: Weights | Weights[], expectedStandardDeviation: number, label: string): void => {
+  const { mean, standardDeviation } = statistics(weights);
   assert.ok(Math.abs(mean) < 0.1 * expectedStandardDeviation, `${label}: mean ${mean}`);
   assert.ok(
     Math.abs(standardDeviation / expectedStandardDeviation - 1) < 0.05,
@@ -28,7 +38,8 @@ const assertNormal = (values: number[][], expectedStandardDeviation: number, lab
   );
 };
 
-const assertAllZero = (values: number[], label: string): void => {
+const assertAllZero = (weights: Weights | Weights[], label: string): void => {
+  const values: number[] = allValues(weights);
   assert.ok(values.length > 0, `${label}: empty`);
   assert.ok(values.every((value) => value === 0), `${label}: not all zero`);
 };
@@ -37,14 +48,16 @@ test("randomNormal() samples have mean 0 and the requested standard deviation", 
   const random = createSeededRandom(1);
   const samples = Array.from({ length: 20000 }, () => randomNormal(random, 0.02));
 
+  // Wrapped in a list, since a plain number[] on its own would be read as a list of vectors.
   assertNormal([samples], 0.02, "samples");
 });
 
 test("randomNormalMatrix() has the requested shape", () => {
   const matrix = randomNormalMatrix(3, 5, 0.02, createSeededRandom(1));
 
-  assert.equal(matrix.length, 3);
-  assert.ok(matrix.every((row) => row.length === 5));
+  assert.equal(matrix.rows, 3);
+  assert.equal(matrix.columns, 5);
+  assert.equal(matrix.data.length, 15);
 });
 
 test("residualProjectionStandardDeviation() divides by sqrt(2 * numberTransformerBlocks)", () => {
@@ -59,7 +72,7 @@ test("every layer of the model is initialized as in GPT-2", () => {
   const residual = 0.02 / Math.sqrt(2 * 6);
 
   // Embeddings and the output layer.
-  const embedding = model.embedding as unknown as { textEmbeddingMatrix: number[][]; positionEmbeddingMatrix: number[][] };
+  const embedding = model.embedding as unknown as { textEmbeddingMatrix: Matrix; positionEmbeddingMatrix: Matrix };
   assertNormal(embedding.textEmbeddingMatrix, 0.02, "token embedding");
   assertNormal(embedding.positionEmbeddingMatrix, 0.01, "position embedding");
   assertNormal(model.linearOutputLayer.weights, 0.02, "output layer");
