@@ -22,6 +22,7 @@ These need no work. They are listed here for reference.
 - Final layer norm, then an output layer with no bias and no weight tying (the book's `out_head`).
 - Parameter count is 163,009,536 when `contextLength` = 1024, which matches the book.
 - Loss: a numerically stable log-softmax, with each target being the input shifted by one token.
+- Weight initialisation follows GPT-2: N(0, 0.02) for every linear layer and the token embedding, N(0, 0.01) for the position embedding, both residual projections scaled by 1/√(2 · blocks), biases 0, layer norm scale 1 and shift 0.
 
 ---
 
@@ -65,25 +66,6 @@ Dropout masks matter most, because they are random draws and can't be recalculat
 - Write shared helpers for multiplying a matrix by a vector or matrix, and for multiplying by a transposed matrix. The backward pass needs both.
 
 **Done when:** the forward pass gives the same results as before, within floating-point tolerance, and runs faster.
-
----
-
-### [ ] 7. Choose one weight initialisation scheme
-
-**Where:** [src/GPTAttention.ts:88-117](src/GPTAttention.ts#L88-L117), [src/FeedForward.ts:73-96](src/FeedForward.ts#L73-L96), [src/Embedding.ts:82-103](src/Embedding.ts#L82-L103), [src/MultiHeadAttention.ts:70-95](src/MultiHeadAttention.ts#L70-L95), [src/LinearOutputLayer.ts:66-89](src/LinearOutputLayer.ts#L66-L89)
-
-**Problem:** The code mixes initialisation styles:
-- Embeddings, the output layer and the attention output projection use GPT-2's normal-distribution initialisation.
-- The query/key/value weights and the feed-forward layers use PyTorch's default `nn.Linear` initialisation.
-- The book uses PyTorch defaults everywhere, including N(0,1) for embeddings.
-
-**Fix:** Choose one scheme. For GPT-2's scheme:
-- Every linear layer uses N(0, 0.02), with biases set to 0.
-- The token embedding uses N(0, 0.02). The position embedding uses N(0, 0.02) to match Hugging Face, or N(0, 0.01) to match OpenAI's original code.
-- **Both** residual projections are scaled by 1/√(2 · numberTransformerBlocks): the attention output projection (already done) and the **second feed-forward layer** (currently missing).
-- Consider one shared `randomNormal` helper. It is currently copied into three classes.
-
-**Done when:** every layer follows the chosen scheme, and the comments say which scheme it is.
 
 ---
 

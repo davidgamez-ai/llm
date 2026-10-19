@@ -1,5 +1,6 @@
 import Hyperparameters from "./Hyperparameters.js";
 import GPTAttention from "./GPTAttention.js";
+import { randomNormalMatrix, residualProjectionStandardDeviation } from "./WeightInitialization.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -21,8 +22,8 @@ class MultiHeadAttention {
   /** Number of transformer blocks in the model, used to scale the output projection's initial weights. */
   numberTransformerBlocks: number;
 
-  /** Base standard deviation for the output projection's initial weights, before scaling by 1 / sqrt(2 * numberTransformerBlocks). */
-  attentionProjectionStandardDeviation: number;
+  /** Standard deviation for linear layer weights (0.02 in GPT-2); the output projection uses it scaled by 1 / sqrt(2 * numberTransformerBlocks). */
+  linearLayerStandardDeviation: number;
 
   /** Output projection weights built by build(): embeddingSize rows by embeddingSize columns. */
   outputProjectionWeights: number[][] = [];
@@ -39,12 +40,12 @@ class MultiHeadAttention {
    * same dimensions, dropout rate and training mode, then builds the
    * output projection.
    *
-   * @param hyperparameters - Source of numberAttentionHeads, embeddingSize, numberTransformerBlocks, attentionProjectionStandardDeviation and the random number stream, and passed on to each GPTAttention head. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of numberAttentionHeads, embeddingSize, numberTransformerBlocks, linearLayerStandardDeviation and the random number stream, and passed on to each GPTAttention head. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.embeddingSize = hyperparameters.embeddingSize;
     this.numberTransformerBlocks = hyperparameters.numberTransformerBlocks;
-    this.attentionProjectionStandardDeviation = hyperparameters.attentionProjectionStandardDeviation;
+    this.linearLayerStandardDeviation = hyperparameters.linearLayerStandardDeviation;
     this.random = () => hyperparameters.random();
     this.attentionHeads = Array.from(
       { length: hyperparameters.numberAttentionHeads },
@@ -59,39 +60,20 @@ class MultiHeadAttention {
   /**
    * Builds the output projection: an embeddingSize x embeddingSize weight
    * matrix and an embeddingSize bias vector, stored on the instance.
-   * Initialized as in GPT-2 (Hugging Face GPT2Model._init_weights):
+   * Initialized as in GPT-2 (Hugging Face GPT2PreTrainedModel._init_weights,
+   * for GPT-2's attention c_proj):
    * - Weights are drawn from a normal distribution with mean 0 and standard
-   *   deviation attentionProjectionStandardDeviation (0.02 by default)
-   *   divided by sqrt(2 * numberTransformerBlocks).
+   *   deviation linearLayerStandardDeviation (0.02 by default)
+   *   divided by sqrt(2 * numberTransformerBlocks), because the output
+   *   projection is a residual projection (see WeightInitialization).
    * - Biases are set to 0.
    *
    * @returns void. The resulting weights and biases are stored on the instance.
    */
   build(): void {
-    /*
-     * GPT-2's base standard deviation for linear layers is 0.02. The output
-     * projection writes into the residual stream, and every transformer
-     * block adds two such contributions to it (attention and feed forward),
-     * so the GPT-2 paper scales these weights by 1 / sqrt(2 * numberOfBlocks)
-     * to stop the residual stream's variance growing with the model's depth.
-     */
-    const standardDeviation = this.attentionProjectionStandardDeviation / Math.sqrt(2 * this.numberTransformerBlocks);
+    const standardDeviation = residualProjectionStandardDeviation(this.linearLayerStandardDeviation, this.numberTransformerBlocks);
 
-    /*
-     * Draws one sample from a normal distribution with mean 0 and the given
-     * standard deviation, using the Box-Muller transform to turn two uniform
-     * samples into a standard normal sample. 1 - random() lies in (0, 1],
-     * so Math.log never receives 0.
-     */
-    const randomNormal = (deviation: number): number => {
-      const u1 = 1 - this.random();
-      const u2 = this.random();
-      return deviation * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-    };
-
-    this.outputProjectionWeights = Array.from({ length: this.embeddingSize }, () =>
-      Array.from({ length: this.embeddingSize }, () => randomNormal(standardDeviation))
-    );
+    this.outputProjectionWeights = randomNormalMatrix(this.embeddingSize, this.embeddingSize, standardDeviation, this.random);
     this.outputProjectionBiases = new Array(this.embeddingSize).fill(0);
 
     if (DEBUG.ATTENTION) console.log(

@@ -1,4 +1,5 @@
 import Hyperparameters from "./Hyperparameters.js";
+import { randomNormalMatrix } from "./WeightInitialization.js";
 import DEBUG from "./Debug.js"
 
 /**
@@ -52,16 +53,19 @@ class GPTAttention {
   /** Value biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
   valueBiases: number[] = [];
 
+  /** Standard deviation of the normal distribution (mean 0) used to initialize the weight matrices. GPT-2 uses 0.02. */
+  standardDeviation: number;
+
   /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
   private readonly random: () => number;
 
   /**
    * Creates a GPTAttention, copying embeddingSize, weightMatrixColumns,
-   * dropoutRate and qkvBias from the given Hyperparameters so this
-   * instance always matches the values used elsewhere in the application,
-   * then builds the weight matrices and biases.
+   * dropoutRate, qkvBias and linearLayerStandardDeviation from the given
+   * Hyperparameters so this instance always matches the values used
+   * elsewhere in the application, then builds the weight matrices and biases.
    *
-   * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate, mode, qkvBias and the random number stream. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate, mode, qkvBias, linearLayerStandardDeviation and the random number stream. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.embeddingSize = hyperparameters.embeddingSize;
@@ -69,6 +73,7 @@ class GPTAttention {
     this.dropoutRate = hyperparameters.dropoutRate;
     this.getMode = () => hyperparameters.mode;
     this.qkvBias = hyperparameters.qkvBias;
+    this.standardDeviation = hyperparameters.linearLayerStandardDeviation;
     this.random = () => hyperparameters.random();
 
     this.build();
@@ -77,44 +82,26 @@ class GPTAttention {
   /**
    * Builds the queryWeights, keyWeights and valueWeights matrices, each
    * embeddingSize rows by weightMatrixColumns columns, and stores them on the
-   * instance. Weights are initialized the same way as PyTorch's nn.Linear:
-   * drawn uniformly from [-1/sqrt(embeddingSize), 1/sqrt(embeddingSize)).
-   * When qkvBias is true, a bias vector of weightMatrixColumns values is
-   * also built for each projection, drawn from the same range as nn.Linear
-   * does; otherwise the bias arrays are left empty.
+   * instance. Initialized as in GPT-2 (Hugging Face
+   * GPT2PreTrainedModel._init_weights, which initializes GPT-2's combined
+   * query/key/value layer c_attn this way):
+   * - Weights are drawn from a normal distribution with mean 0 and standard
+   *   deviation standardDeviation (0.02 by default).
+   * - When qkvBias is true, each projection has a bias vector of
+   *   weightMatrixColumns values, all 0; otherwise the bias arrays are left
+   *   empty.
    *
    * @returns void. The resulting matrices and biases are stored on the instance.
    */
   build(): void {
-    /*
-     * PyTorch's nn.Linear uses kaiming_uniform_ with a = sqrt(5), which
-     * works out as a uniform distribution over [-bound, bound) with
-     * bound = 1 / sqrt(fan_in). Here fan_in is the number of inputs to each
-     * output, i.e. embeddingSize. Scaling the range by fan_in keeps the
-     * variance of the projected query, key and value vectors roughly
-     * independent of the embedding size.
-     */
-    const bound = 1 / Math.sqrt(this.embeddingSize);
+    // Called once per weight matrix, so each gets its own independent set of random values.
+    this.queryWeights = randomNormalMatrix(this.embeddingSize, this.weightMatrixColumns, this.standardDeviation, this.random);
+    this.keyWeights = randomNormalMatrix(this.embeddingSize, this.weightMatrixColumns, this.standardDeviation, this.random);
+    this.valueWeights = randomNormalMatrix(this.embeddingSize, this.weightMatrixColumns, this.standardDeviation, this.random);
 
-    // A fresh embeddingSize x weightMatrixColumns matrix of random values
-    // in [-bound, bound); called once per weight matrix so each gets its own
-    // independent set of random values.
-    const buildMatrix = () =>
-      Array.from({ length: this.embeddingSize }, () =>
-        Array.from({ length: this.weightMatrixColumns }, () => (this.random() * 2 - 1) * bound)
-      );
-
-    this.queryWeights = buildMatrix();
-    this.keyWeights = buildMatrix();
-    this.valueWeights = buildMatrix();
-
-    // A fresh bias vector with the same bound as the weights, as in nn.Linear.
-    const buildBiases = () =>
-      Array.from({ length: this.weightMatrixColumns }, () => (this.random() * 2 - 1) * bound);
-
-    this.queryBiases = this.qkvBias ? buildBiases() : [];
-    this.keyBiases = this.qkvBias ? buildBiases() : [];
-    this.valueBiases = this.qkvBias ? buildBiases() : [];
+    this.queryBiases = this.qkvBias ? new Array(this.weightMatrixColumns).fill(0) : [];
+    this.keyBiases = this.qkvBias ? new Array(this.weightMatrixColumns).fill(0) : [];
+    this.valueBiases = this.qkvBias ? new Array(this.weightMatrixColumns).fill(0) : [];
 
     if(DEBUG.QKV) console.log(
       `GPTAttention| Weight matrices built. Rows: ${this.embeddingSize}; columns: ${this.weightMatrixColumns}`

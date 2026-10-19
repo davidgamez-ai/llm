@@ -270,7 +270,7 @@ test("positionEmbeddingStandardDeviation setter rejects negative, infinite and N
 // The weight initialization standard deviations that default to GPT-2's 0.02.
 const gpt2StandardDeviations = [
   "tokenEmbeddingStandardDeviation",
-  "attentionProjectionStandardDeviation",
+  "linearLayerStandardDeviation",
   "outputLayerStandardDeviation",
 ] as const;
 

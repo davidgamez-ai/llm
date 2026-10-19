@@ -46,7 +46,7 @@ class Hyperparameters {
   private _feedForwardBias: boolean;
   private _positionEmbeddingStandardDeviation: number;
   private _tokenEmbeddingStandardDeviation: number;
-  private _attentionProjectionStandardDeviation: number;
+  private _linearLayerStandardDeviation: number;
   private _outputLayerStandardDeviation: number;
   private _outputLength: number;
   private _trainingRatio: number;
@@ -97,11 +97,14 @@ class Hyperparameters {
    * normal distribution (mean 0) used to initialize the token embedding
    * matrix. Defaults to 0.02, as in GPT-2. Must be a finite number greater
    * than or equal to 0.
-   * @param attentionProjectionStandardDeviation - The base standard deviation
-   * of the normal distribution (mean 0) used to initialize the multi-head
-   * attention output projection, before it is divided by
-   * sqrt(2 * numberTransformerBlocks). Defaults to 0.02, as in GPT-2. Must be
-   * a finite number greater than or equal to 0.
+   * @param linearLayerStandardDeviation - The standard deviation of the
+   * normal distribution (mean 0) used to initialize the weights of every
+   * linear layer in the transformer blocks: the query, key and value
+   * weights, the attention output projection and both feed forward layers.
+   * The two residual projections (the attention output projection and the
+   * second feed forward layer) divide it by sqrt(2 * numberTransformerBlocks).
+   * Defaults to 0.02, GPT-2's initializer_range. Must be a finite number
+   * greater than or equal to 0.
    * @param outputLayerStandardDeviation - The standard deviation of the
    * normal distribution (mean 0) used to initialize the linear output
    * layer's weight matrix. Defaults to 0.02, as in GPT-2. Must be a finite
@@ -131,7 +134,7 @@ class Hyperparameters {
    * @throws RangeError if numberTransformerBlocks is not a positive whole number.
    * @throws RangeError if batchSize is not a positive whole number.
    * @throws RangeError if positionEmbeddingStandardDeviation,
-   * tokenEmbeddingStandardDeviation, attentionProjectionStandardDeviation or
+   * tokenEmbeddingStandardDeviation, linearLayerStandardDeviation or
    * outputLayerStandardDeviation is negative, infinite or NaN.
    * @throws RangeError if outputLength is not a positive whole number.
    * @throws RangeError if trainingRatio is not greater than 0 and less than 1.
@@ -149,7 +152,7 @@ class Hyperparameters {
     feedForwardBias: boolean = true,
     positionEmbeddingStandardDeviation: number = 0.01,
     tokenEmbeddingStandardDeviation: number = 0.02,
-    attentionProjectionStandardDeviation: number = 0.02,
+    linearLayerStandardDeviation: number = 0.02,
     outputLayerStandardDeviation: number = 0.02,
     outputLength: number = 2,
     trainingRatio: number = 0.9,
@@ -165,7 +168,7 @@ class Hyperparameters {
     Hyperparameters.validatePositiveInteger("batchSize", batchSize);
     Hyperparameters.validateStandardDeviation("positionEmbeddingStandardDeviation", positionEmbeddingStandardDeviation);
     Hyperparameters.validateStandardDeviation("tokenEmbeddingStandardDeviation", tokenEmbeddingStandardDeviation);
-    Hyperparameters.validateStandardDeviation("attentionProjectionStandardDeviation", attentionProjectionStandardDeviation);
+    Hyperparameters.validateStandardDeviation("linearLayerStandardDeviation", linearLayerStandardDeviation);
     Hyperparameters.validateStandardDeviation("outputLayerStandardDeviation", outputLayerStandardDeviation);
     Hyperparameters.validatePositiveInteger("outputLength", outputLength);
     Hyperparameters.validateTrainingRatio(trainingRatio);
@@ -184,7 +187,7 @@ class Hyperparameters {
     this._feedForwardBias = feedForwardBias;
     this._positionEmbeddingStandardDeviation = positionEmbeddingStandardDeviation;
     this._tokenEmbeddingStandardDeviation = tokenEmbeddingStandardDeviation;
-    this._attentionProjectionStandardDeviation = attentionProjectionStandardDeviation;
+    this._linearLayerStandardDeviation = linearLayerStandardDeviation;
     this._outputLayerStandardDeviation = outputLayerStandardDeviation;
     this._outputLength = outputLength;
     this._trainingRatio = trainingRatio;
@@ -469,19 +472,21 @@ class Hyperparameters {
   }
 
   /**
-   * The base standard deviation of the normal distribution (mean 0) used to
-   * initialize the multi-head attention output projection. GPT-2 uses 0.02.
-   * MultiHeadAttention divides it by sqrt(2 * numberTransformerBlocks) to
-   * stop the residual stream's variance growing with the model's depth.
+   * The standard deviation of the normal distribution (mean 0) used to
+   * initialize the weights of every linear layer in the transformer blocks.
+   * GPT-2 uses 0.02. The two residual projections (MultiHeadAttention's
+   * output projection and FeedForward's second layer) divide it by
+   * sqrt(2 * numberTransformerBlocks) to stop the residual stream's variance
+   * growing with the model's depth.
    */
-  get attentionProjectionStandardDeviation(): number {
-    return this._attentionProjectionStandardDeviation;
+  get linearLayerStandardDeviation(): number {
+    return this._linearLayerStandardDeviation;
   }
 
-  /** @throws RangeError if attentionProjectionStandardDeviation is negative, infinite or NaN. */
-  set attentionProjectionStandardDeviation(attentionProjectionStandardDeviation: number) {
-    Hyperparameters.validateStandardDeviation("attentionProjectionStandardDeviation", attentionProjectionStandardDeviation);
-    this._attentionProjectionStandardDeviation = attentionProjectionStandardDeviation;
+  /** @throws RangeError if linearLayerStandardDeviation is negative, infinite or NaN. */
+  set linearLayerStandardDeviation(linearLayerStandardDeviation: number) {
+    Hyperparameters.validateStandardDeviation("linearLayerStandardDeviation", linearLayerStandardDeviation);
+    this._linearLayerStandardDeviation = linearLayerStandardDeviation;
   }
 
   /**

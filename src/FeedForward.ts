@@ -1,4 +1,5 @@
 import Hyperparameters from "./Hyperparameters.js";
+import { randomNormalMatrix, residualProjectionStandardDeviation } from "./WeightInitialization.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -38,20 +39,29 @@ class FeedForward {
   /** Second linear layer biases built by build(): one per output unit, embeddingSize values. Empty when bias is false. */
   secondLayerBiases: number[] = [];
 
+  /** Standard deviation for linear layer weights (0.02 in GPT-2); the second layer uses it scaled by 1 / sqrt(2 * numberTransformerBlocks). */
+  linearLayerStandardDeviation: number;
+
+  /** Number of transformer blocks in the model, used to scale the second layer's initial weights. */
+  numberTransformerBlocks: number;
+
   /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
   private readonly random: () => number;
 
   /**
-   * Creates a FeedForward, copying embeddingSize and feedForwardBias from
-   * the given Hyperparameters so this instance always matches the values
-   * used elsewhere in the application, then builds the network.
+   * Creates a FeedForward, copying embeddingSize, feedForwardBias,
+   * linearLayerStandardDeviation and numberTransformerBlocks from the given
+   * Hyperparameters so this instance always matches the values used
+   * elsewhere in the application, then builds the network.
    *
-   * @param hyperparameters - Source of embeddingSize, feedForwardBias and the random number stream. Defaults to a new Hyperparameters instance.
+   * @param hyperparameters - Source of embeddingSize, feedForwardBias, linearLayerStandardDeviation, numberTransformerBlocks and the random number stream. Defaults to a new Hyperparameters instance.
    */
   constructor(hyperparameters: Hyperparameters = new Hyperparameters()) {
     this.embeddingSize = hyperparameters.embeddingSize;
     this.hiddenSize = 4 * this.embeddingSize;
     this.bias = hyperparameters.feedForwardBias;
+    this.linearLayerStandardDeviation = hyperparameters.linearLayerStandardDeviation;
+    this.numberTransformerBlocks = hyperparameters.numberTransformerBlocks;
     this.random = () => hyperparameters.random();
 
     this.build();
@@ -62,38 +72,30 @@ class FeedForward {
    * on the instance. The first layer maps embeddingSize inputs to hiddenSize
    * (4 * embeddingSize) outputs; the second maps hiddenSize inputs back to
    * embeddingSize outputs. The GELU activation between them has no
-   * parameters, so nothing is built for it. Weights and biases are
-   * initialized the same way as PyTorch's nn.Linear: drawn uniformly from
-   * [-1/sqrt(fanIn), 1/sqrt(fanIn)), where fanIn is the layer's input width.
-   * Biases are only built when bias is true; otherwise the bias arrays are
-   * left empty.
+   * parameters, so nothing is built for it. Initialized as in GPT-2 (Hugging
+   * Face GPT2PreTrainedModel._init_weights, for GPT-2's mlp.c_fc and
+   * mlp.c_proj):
+   * - First layer weights are drawn from a normal distribution with mean 0
+   *   and standard deviation linearLayerStandardDeviation (0.02 by default).
+   * - Second layer weights use that standard deviation divided by
+   *   sqrt(2 * numberTransformerBlocks), because the second layer is a
+   *   residual projection: its output is added straight to the residual
+   *   stream (see WeightInitialization).
+   * - Biases are set to 0. They are only built when bias is true; otherwise
+   *   the bias arrays are left empty.
    *
    * @returns void. The resulting weights and biases are stored on the instance.
    */
   build(): void {
-    /*
-     * A fresh rows x columns matrix of random values in [-bound, bound),
-     * where bound = 1 / sqrt(rows). rows is the layer's fan in, so scaling
-     * by it keeps the variance of each layer's output roughly independent
-     * of its input width.
-     */
-    const buildMatrix = (rows: number, columns: number): number[][] => {
-      const bound = 1 / Math.sqrt(rows);
-      return Array.from({ length: rows }, () =>
-        Array.from({ length: columns }, () => (this.random() * 2 - 1) * bound)
-      );
-    };
+    const secondLayerStandardDeviation = residualProjectionStandardDeviation(
+      this.linearLayerStandardDeviation,
+      this.numberTransformerBlocks
+    );
 
-    // A bias vector with the same bound as the matching weight matrix, as in nn.Linear.
-    const buildBiases = (fanIn: number, length: number): number[] => {
-      const bound = 1 / Math.sqrt(fanIn);
-      return Array.from({ length }, () => (this.random() * 2 - 1) * bound);
-    };
-
-    this.firstLayerWeights = buildMatrix(this.embeddingSize, this.hiddenSize);
-    this.secondLayerWeights = buildMatrix(this.hiddenSize, this.embeddingSize);
-    this.firstLayerBiases = this.bias ? buildBiases(this.embeddingSize, this.hiddenSize) : [];
-    this.secondLayerBiases = this.bias ? buildBiases(this.hiddenSize, this.embeddingSize) : [];
+    this.firstLayerWeights = randomNormalMatrix(this.embeddingSize, this.hiddenSize, this.linearLayerStandardDeviation, this.random);
+    this.secondLayerWeights = randomNormalMatrix(this.hiddenSize, this.embeddingSize, secondLayerStandardDeviation, this.random);
+    this.firstLayerBiases = this.bias ? new Array(this.hiddenSize).fill(0) : [];
+    this.secondLayerBiases = this.bias ? new Array(this.embeddingSize).fill(0) : [];
 
     if (DEBUG.FEED_FORWARD) {
       console.log(

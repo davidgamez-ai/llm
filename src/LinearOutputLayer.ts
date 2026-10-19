@@ -1,4 +1,5 @@
 import Hyperparameters from "./Hyperparameters.js";
+import { randomNormalMatrix } from "./WeightInitialization.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -56,27 +57,17 @@ class LinearOutputLayer {
 
   /**
    * Builds the vocabSize x embeddingSize weight matrix and stores it on the
-   * instance. Initialized as in GPT-2 (Hugging Face GPT2Model._init_weights),
-   * with values drawn from a normal distribution with mean 0 and standard
-   * deviation standardDeviation (0.02 by default). Random values come from
-   * the Hyperparameters' shared stream, so the matrix is reproducible when
-   * Hyperparameters.seed is set.
+   * instance. Initialized as in GPT-2 (Hugging Face
+   * GPT2PreTrainedModel._init_weights), with values drawn from a normal
+   * distribution with mean 0 and standard deviation standardDeviation (0.02
+   * by default). GPT-2 itself ties this matrix to the token embedding, which
+   * is initialized the same way; here the two are separate, as in the book.
+   * Random values come from the Hyperparameters' shared stream, so the
+   * matrix is reproducible when Hyperparameters.seed is set.
    *
    * @returns void. The resulting matrix is stored on the instance.
    */
   build(): void {
-    /*
-     * Draws one sample from a normal distribution with mean 0 and the given
-     * standard deviation, using the Box-Muller transform to turn two uniform
-     * samples into a standard normal sample. 1 - random() lies in (0, 1],
-     * so Math.log never receives 0.
-     */
-    const randomNormal = (deviation: number): number => {
-      const u1 = 1 - this.random();
-      const u2 = this.random();
-      return deviation * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-    };
-
     /*
      * A small standard deviation keeps the initial logits close together:
      * each logit is a dot product of embeddingSize terms with a normalized
@@ -85,9 +76,7 @@ class LinearOutputLayer {
      * The untrained model therefore gives every token a similar probability,
      * and the initial loss is close to ln(vocabSize), about 10.8.
      */
-    this.weights = Array.from({ length: this.vocabSize }, () =>
-      Array.from({ length: this.embeddingSize }, () => randomNormal(this.standardDeviation))
-    );
+    this.weights = randomNormalMatrix(this.vocabSize, this.embeddingSize, this.standardDeviation, this.random);
 
     if (DEBUG.LINEAR_OUTPUT_LAYER) console.log(
       `LinearOutputLayer| Weight matrix built. Rows: ${this.weights.length}; columns: ${this.weights[0].length}`

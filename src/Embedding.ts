@@ -1,5 +1,6 @@
 import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
+import { randomNormalMatrix } from "./WeightInitialization.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -68,14 +69,14 @@ class Embedding {
    * Builds the two embedding matrices, stores them on the instance, and logs
    * their dimensions:
    * - textEmbeddingMatrix: vocabSize x embeddingSize, initialized as in
-   *   GPT-2 (Hugging Face GPT2Model._init_weights), with values drawn from a
+   *   GPT-2 (Hugging Face GPT2PreTrainedModel._init_weights), with values drawn from a
    *   normal distribution with mean 0 and standard deviation
    *   tokenEmbeddingStandardDeviation (0.02 by default).
    * - positionEmbeddingMatrix: contextLength x embeddingSize, initialized as
    *   in OpenAI's original GPT-2 TensorFlow code (model.py, wpe), with values
    *   drawn from a normal distribution with mean 0 and standard deviation
    *   positionEmbeddingStandardDeviation (0.01 by default). Hugging Face's
-   *   GPT2Model._init_weights uses 0.02 for the position embeddings instead,
+   *   GPT2PreTrainedModel._init_weights uses 0.02 for the position embeddings instead,
    *   the same as for the token embeddings.
    *
    * Random values come from the Hyperparameters' shared stream, so the
@@ -84,26 +85,11 @@ class Embedding {
    * @returns void. The resulting matrices are stored on the instance for use by getEmbedding.
    */
   build(): void {
-    const random = this.random;
-
-    /*
-     * Draws one sample from a normal distribution with mean 0 and the given
-     * standard deviation, using the Box-Muller transform to turn two uniform
-     * samples into a standard normal sample. 1 - random() lies in (0, 1], so
-     * Math.log never receives 0.
-     */
-    const randomNormal = (standardDeviation: number): number => {
-      const u1 = 1 - random();
-      const u2 = random();
-      return standardDeviation * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-    };
-
-    this.textEmbeddingMatrix = Array.from({ length: this.vocabSize }, () =>
-      Array.from({ length: this.embeddingSize }, () => randomNormal(this.tokenEmbeddingStandardDeviation))
+    this.textEmbeddingMatrix = randomNormalMatrix(
+      this.vocabSize, this.embeddingSize, this.tokenEmbeddingStandardDeviation, this.random
     );
-
-    this.positionEmbeddingMatrix = Array.from({ length: this.contextLength }, () =>
-      Array.from({ length: this.embeddingSize }, () => randomNormal(this.positionEmbeddingStandardDeviation))
+    this.positionEmbeddingMatrix = randomNormalMatrix(
+      this.contextLength, this.embeddingSize, this.positionEmbeddingStandardDeviation, this.random
     );
 
     if(DEBUG.EMBEDDING) {
