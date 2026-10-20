@@ -256,4 +256,39 @@ export function addToVector(target, values) {
         target[i] += values[i];
     }
 }
+/**
+ * Combines one window's gradients with the gradients stored so far in the
+ * batch, as dnn's calculateGradients(batchAverage) does. Every component
+ * calls this for each of its gradient arrays.
+ *
+ * - When count is 1 (the first window of a batch), the new gradients
+ *   replace the stored ones: the new array is simply returned.
+ * - Otherwise the new gradients are folded into the stored ones as a
+ *   running mean, changing mean in place:
+ *
+ *       mean = mean + (values - mean) / count
+ *
+ *   After k windows this equals the sum of their gradients divided by k,
+ *   without having to keep every window's gradients.
+ *
+ * @param mean - The gradients stored so far: the mean over count - 1 windows. Ignored when count is 1.
+ * @param values - This window's gradients, the same shape as mean.
+ * @param count - The number of windows averaged, including this one.
+ * @returns The array now holding the gradients: values when count is 1, otherwise mean.
+ * @throws RangeError if count is more than 1 and mean and values are different sizes.
+ */
+export function runningMean(mean, values, count) {
+    if (count === 1) {
+        return values;
+    }
+    const meanData = mean instanceof Matrix ? mean.data : mean;
+    const valueData = values instanceof Matrix ? values.data : values;
+    if (meanData.length !== valueData.length) {
+        throw new RangeError(`Matrix| Cannot average ${valueData.length} gradients into ${meanData.length}`);
+    }
+    for (let i = 0; i < meanData.length; i++) {
+        meanData[i] += (valueData[i] - meanData[i]) / count;
+    }
+    return mean;
+}
 export default Matrix;

@@ -64,13 +64,24 @@ updateWeights(optimizer: AdamW): void                // AdamW step on this compo
   `queryWeightGradients`, `firstLayerBiasGradients`.
 - Gradients for one window are **summed over every token position**, because
   the same weights are used at every position.
-- Batch averaging copies dnn exactly. Each component keeps a
-  `_gradientCount`:
+- Gradient arrays are **empty until `calculateGradients` is first called**
+  (allocated lazily), so a model that is only used for generation does not
+  double its memory.
+- Batch averaging copies dnn exactly. Each component with parameters keeps a
+  public `gradientCount`:
   - `calculateGradients(false)` (first window of a batch) replaces the stored
     gradients and sets the count to 1;
   - `calculateGradients(true)` (remaining windows) increments the count to `k`
     and folds the new gradients into a running mean:
     `mean += (new − mean) / k`.
+  - Every component does this with the shared helper
+    `runningMean(mean, values, count)` in `Matrix.ts` (added in step 6), so
+    each `calculateGradients` ends with the same two lines:
+
+    ```ts
+    this.gradientCount = batchAverage && this.gradientCount > 0 ? this.gradientCount + 1 : 1;
+    this.weightGradients = runningMean(this.weightGradients, weightGradients, this.gradientCount);
+    ```
 - The output errors for a window are the gradient of that window's **mean**
   loss per token: `(softmax − oneHot) / contextLength`. Every window has
   exactly `contextLength` tokens, so the mean of the window means is the mean
@@ -271,34 +282,71 @@ and samples large arrays.
 
 ---
 
-## Step 6: `LinearOutputLayer` backpropagation
+## Notes that apply to steps 6–12 ✅ done
 
-**Forward:** `z[t] = W · h[t]` (W is vocabSize × embeddingSize, no bias).
+- **Pattern.** Every component now has `backpropagate(outputErrors)`, which
+  stores the errors and returns the errors at its input, and
+  `calculateGradients(batchAverage)`, which builds this window's gradients in
+  new arrays and combines them with the stored ones through `runningMean`
+  (see A3).
+- **Stored state** is private. Gradients and `gradientCount` are public
+  fields, so the optimizer (step 15) and the tests can read them.
+- **Errors for the wrong number of tokens.** Every `backpropagate` throws a
+  `RangeError` if it is not given one row of errors per token from the most
+  recent `update`.
+- **Forward pass unchanged.** The step 1 reference logits and the untrained
+  validation loss still match after every step.
+- **Test set-up.** The tests use embeddingSize 8, 4 tokens, dropout 0 unless
+  testing dropout, and a shared `randomMatrix(rows, columns, seed, scale)`
+  helper (added to `GradientCheck.ts`). Two choices keep the gradient checks
+  meaningful:
+  - The attention, multi-head attention and transformer tests set
+    `linearLayerStandardDeviation = 0.5` (instead of 0.02). With GPT-2's
+    small weights the attention weights are almost uniform, so the softmax
+    would barely be tested.
+  - Layer-norm scale and shift, and biases, are set to random values instead
+    of their initial 1s and 0s, so the general case is covered.
+- **Mutation check.** To confirm the gradient tests really catch mistakes,
+  three bugs were injected one at a time into the compiled code, and each
+  made its component's tests fail:
+  - the `/ sqrt(d)` in attention's backward pass removed;
+  - the variance term removed from layer normalization's backward pass;
+  - the first shortcut dropped from the transformer's backward pass.
 
-**Changes**
-- `update` stores `inputs` (h).
-- `backpropagate(dZ)`: stores `dZ`; returns `dH[t] = vectorTimesMatrix(dZ[t], W)`.
-- `calculateGradients(batchAverage)`: `dW = Σ_t dZ[t] ⊗ h[t]`, with
-  replace/running mean as in A3.
-- Getters: `weightGradients`, `gradientCount`.
-
-**Check**
-- `checkGradients` on a tiny layer (use a small `embeddingSize`; the vocabulary
-  is large, so sample parameter indices rather than checking them all) for
-  both `W` and the input errors.
-- A **batch-averaging test**: `calculateGradients(false)` after window A then
-  `calculateGradients(true)` after window B gives the mean of the gradients
-  of A and B computed separately. (This tests the A3 convention once; later
-  components use the same code pattern.)
+  The compiled code was then rebuilt from the unchanged source.
 
 ---
 
-## Step 7: `LayerNormalization` backpropagation
+## Step 6: `LinearOutputLayer` backpropagation ✅ done
+
+**Forward:** `z[t] = W · h[t]` (W is vocabSize × embeddingSize, no bias).
+
+**What was done**
+- New `runningMean(mean, values, count)` in `Matrix.ts`, used by every
+  component for batch averaging (A3).
+- `update` stores `inputs` (h).
+- `backpropagate(dZ)`: stores `dZ`; returns `dH[t] = vectorTimesMatrix(dZ[t], W)`.
+- `calculateGradients(batchAverage)`: `dW = Σ_t dZ[t] ⊗ h[t]`, via
+  `addOuterProduct(dW, dZ[t], h[t])`. The arguments are the other way round
+  from the input × output layers, because this layer's weights are stored
+  output × input; a comment says so.
+- Public fields: `weightGradients`, `gradientCount`.
+
+**Check:** `LinearOutputLayer.test.ts` (3 tests): gradient check of the
+weights (sampled, since there are 50,257 × 8) and the input errors; a
+**batch-averaging test** showing that `calculateGradients(false)` then
+`calculateGradients(true)` gives the mean of the two windows' separate
+gradients, and that `false` resets the count to 1; rejection of errors for
+the wrong number of tokens.
+
+---
+
+## Step 7: `LayerNormalization` backpropagation ✅ done
 
 **Forward (per token):** `μ`, `σ = sqrt(var + ε)`, `x̂ = (x − μ) / σ`,
 `y = γ ⊙ x̂ + β`.
 
-**Changes**
+**What was done**
 - `update` stores `normalized` (x̂) and `standardDeviations` (σ) per token.
 - `backpropagate(dY)`: stores `dY`; with `dX̂ = dY ⊙ γ`, returns per token
 
@@ -306,161 +354,170 @@ and samples large arrays.
   dX = (1/σ) · (dX̂ − mean(dX̂) − x̂ · mean(dX̂ ⊙ x̂))
   ```
 
-  The comment explains the three terms: the direct path, the path through
-  the mean, and the path through the variance.
+  The comment explains the three terms (the direct path, the path through
+  the mean and the path through σ), and why each token's input errors sum
+  to 0.
 - `calculateGradients`: `dγ = Σ_t dY[t] ⊙ x̂[t]`, `dβ = Σ_t dY[t]`.
+- Public fields: `scaleGradients`, `shiftGradients`, `gradientCount`.
 
-**Check**
-- `checkGradients` for `scale`, `shift` and the input errors. Set `scale` and
-  `shift` to random values first, so the test does not only cover `γ = 1`,
-  `β = 0`.
-- Step 1's reference logits are unchanged.
+**Check:** `LayerNormalization.test.ts` (3 tests): mean 0 and variance 1
+with the initial scale and shift; a gradient check of `scale`, `shift` and
+the input errors, with random scale and shift and inputs that have a
+non-zero mean; each token's input errors sum to 0.
 
 ---
 
-## Step 8: `FeedForward` backpropagation
+## Step 8: `FeedForward` backpropagation ✅ done
 
 **Forward (per token):** `p = x·W1 + b1`, `a = GELU(p)`, `y = a·W2 + b2`.
 
-**Changes**
-- Move `gelu` to a module-level exported function and add
-  `geluDerivative(x)`. For `u = sqrt(2/π)(x + 0.044715x³)`:
+**What was done**
+- `gelu(x)` and the new `geluDerivative(x)` are exported module-level
+  functions (as `relu` and `sigmoid` are in dnn). For
+  `u = sqrt(2/π)(x + 0.044715x³)`:
 
   ```
   GELU′(x) = 0.5(1 + tanh u) + 0.5x(1 − tanh² u) · sqrt(2/π)(1 + 3·0.044715x²)
   ```
 
 - `update` stores `inputs` (x), `preActivations` (p), `activations` (a).
-- `backpropagate(dY)`:
-  - `dA[t] = matrixTimesVector(W2, dY[t])`
-  - `dP[t] = dA[t] ⊙ GELU′(p[t])`
-  - returns `dX[t] = matrixTimesVector(W1, dP[t])`
-  - stores `dY` and `dP`.
-- `calculateGradients`: `dW2 = Σ_t a[t] ⊗ dY[t]`, `db2 = Σ_t dY[t]`,
-  `dW1 = Σ_t x[t] ⊗ dP[t]`, `db1 = Σ_t dP[t]` (biases only when `bias` is true).
+- `backpropagate(dY)`: `dA = matrixTimesVector(W2, dY)`,
+  `dP = dA ⊙ GELU′(p)`, returns `dX = matrixTimesVector(W1, dP)`; stores
+  `dY` and `dP` (`preActivationErrors`).
+- `calculateGradients`: `dW2 = Σ_t a ⊗ dY`, `db2 = Σ_t dY`,
+  `dW1 = Σ_t x ⊗ dP`, `db1 = Σ_t dP`. The bias gradients stay empty when
+  `bias` is false.
+- Public fields: `firstLayerWeightGradients`, `firstLayerBiasGradients`,
+  `secondLayerWeightGradients`, `secondLayerBiasGradients`, `gradientCount`.
 
-**Check**
-- `geluDerivative` matches `(gelu(x+h) − gelu(x−h)) / 2h` for x in
-  `[−4, 4]`.
-- `checkGradients` for all four parameter arrays and the input errors, with
-  `feedForwardBias` both true and false.
+**Check:** `FeedForward.test.ts` (4 tests): `geluDerivative` matches the
+numerical slope of `gelu` from −4 to 4 to `1e-8`; basic `gelu` values; a
+gradient check of all four parameter arrays and the input errors with
+biases, and one without biases (whose bias gradients stay empty).
 
 ---
 
-## Step 9: `GPTAttention` backpropagation (one head)
+## Step 9: `GPTAttention` backpropagation (one head) ✅ done
 
 **Forward:** `Q = XWq`, `K = XWk`, `V = XWv`; `S = QKᵀ / sqrt(d)`; causal
 mask; `A = softmax(S)` row by row; `A′ = dropout(A)`; `C = A′V`.
 
-**Changes**
+**What was done**
 - `update` stores `inputs` (X), `queries`, `keys`, `values`,
-  `attentionWeights` (A) and `finalAttentionWeights` (A′);
-  `attentionDropout` already holds its mask.
+  `attentionWeights` (A) and `finalAttentionWeights` (A′); `attentionDropout`
+  holds its mask.
 - `backpropagate(dC)`, one commented block per step:
   1. Context vectors: `dA′[i][j] = dC[i] · V[j]`; `dV[j] = Σ_i A′[i][j] · dC[i]`.
   2. Dropout: `dA = attentionDropout.backpropagate(dA′)`.
   3. Softmax, row by row: `dS[i][j] = A[i][j] · (dA[i][j] − Σ_k A[i][k] · dA[i][k])`.
-     Masked positions have `A = 0`, so their errors are automatically 0: the
-     causal mask needs no special handling (worth a comment).
+     The comment notes that masked positions have `A = 0`, so the causal
+     mask needs no special handling.
   4. Scaling: `dS ← dS / sqrt(d)`.
   5. Scores: `dQ[i] = Σ_j dS[i][j] · K[j]`; `dK[j] = Σ_i dS[i][j] · Q[i]`.
-  6. Inputs (fan-out to three projections, so the errors are summed):
-     `dX[t] = matrixTimesVector(Wq, dQ[t]) + matrixTimesVector(Wk, dK[t]) + matrixTimesVector(Wv, dV[t])`.
+  6. Inputs, summing the errors from the three projections:
+     `dX = matrixTimesVector(Wq, dQ) + matrixTimesVector(Wk, dK) + matrixTimesVector(Wv, dV)`.
   - Stores `dQ`, `dK`, `dV`.
-- `calculateGradients`: `dWq = Σ_t X[t] ⊗ dQ[t]` (likewise for K and V);
-  biases when `qkvBias`.
+- `calculateGradients`: `dWq = Σ_t X ⊗ dQ` (likewise for K and V); biases
+  when `qkvBias`.
+- Public fields: `queryWeightGradients`, `keyWeightGradients`,
+  `valueWeightGradients`, `queryBiasGradients`, `keyBiasGradients`,
+  `valueBiasGradients`, `gradientCount`.
 
-**Check**
-- `checkGradients` for `Wq`, `Wk`, `Wv` and the input errors, with
-  `qkvBias` true and false, and `dropoutRate = 0`.
-- A dropout version: `dropoutRate = 0.5`. The helper reruns `forward()`, which
-  would draw a new mask, so for this test reset `hyperparameters.seed` before
-  every forward pass so the same mask is drawn each time.
-- A causality test: errors placed only on the context vector of token 0 give
-  zero input errors for tokens 1..n−1.
-- Step 1's reference logits are unchanged.
+**Check:** `GPTAttention.test.ts` (5 tests): gradient checks with and
+without biases; a gradient check with `dropoutRate = 0.5`, resetting the
+seed before every forward pass so the same mask is drawn each time (the
+test confirms some weights really were dropped); a **causality test**
+(errors on token 0's context vector give exactly zero input errors for
+tokens 1–3); rejection of errors for the wrong number of tokens.
 
 ---
 
-## Step 10: `MultiHeadAttention` backpropagation
+## Step 10: `MultiHeadAttention` backpropagation ✅ done
 
 **Forward:** concatenate the heads' `C` into `H` (one row per token), then
 `Y = H·Wo + bo`.
 
-**Changes**
+**What was done**
 - `update` stores `contextVectors` (H).
-- `backpropagate(dY)`:
-  - `dH[t] = matrixTimesVector(Wo, dY[t])`;
-  - split each row of `dH` into one slice of `weightMatrixColumns` per head
-    (the reverse of the concatenation);
-  - pass each slice to its head's `backpropagate`;
-  - **sum** the heads' returned input errors, because every head received
-    the same embeddings (fan-out).
-- `calculateGradients`: `dWo = Σ_t H[t] ⊗ dY[t]`, `dbo = Σ_t dY[t]`; then
-  each head's `calculateGradients`.
+- `backpropagate(dY)`: `dH = matrixTimesVector(Wo, dY)`; splits each row of
+  `dH` into one slice of `weightMatrixColumns` per head; passes each slice
+  to its head's `backpropagate`; **sums** the heads' input errors.
+- `calculateGradients`: `dWo = Σ_t H ⊗ dY`, `dbo = Σ_t dY`, then every
+  head's `calculateGradients`.
+- Public fields: `outputProjectionWeightGradients`,
+  `outputProjectionBiasGradients`, `gradientCount`.
 
-**Check**
-- `checkGradients` for `Wo`, `bo`, one head's `Wq`, and the input errors,
-  with 2 heads.
+**Check:** `MultiHeadAttention.test.ts` (3 tests): a gradient check of
+`Wo`, `bo`, head 0's query weights, head 1's key and value weights (checking
+the errors are split between the heads correctly) and the input errors;
+`calculateGradients` also fills every head's gradients; rejection of errors
+for the wrong number of tokens.
 
 ---
 
-## Step 11: `Transformer` backpropagation
+## Step 11: `Transformer` backpropagation ✅ done
 
 **Forward:**
 
 ```
-s   = x + dropout1(MHA(LN1(x)))
-out = s + dropout2(FF(LN2(s)))
+s   = x + attentionOutputDropout(MHA(LN1(x)))
+out = s + feedForwardOutputDropout(FF(LN2(s)))
 ```
 
-**Changes**
+**What was done**
 - `backpropagate(dOut)`:
 
   ```
-  dS = dOut + LN2.back(FF.back(dropout2.back(dOut)))
-  dX = dS   + LN1.back(MHA.back(dropout1.back(dS)))
+  dS = dOut + LN2.back(FF.back(feedForwardOutputDropout.back(dOut)))
+  dX = dS   + LN1.back(MHA.back(attentionOutputDropout.back(dS)))
   ```
 
-  where `dropout1` is `attentionOutputDropout` and `dropout2` is
-  `feedForwardOutputDropout`. The comment stresses that each shortcut copies
-  the errors straight through, unchanged, and they are added to the errors
-  from the branch. This is why residual connections stop gradients
-  vanishing in deep models.
-- `calculateGradients`: delegates to `MHA`, `FF`, `LN1`, `LN2`.
-- Reuse the existing `add` method for the error sums.
+  using the existing `add` method for the sums. The comment explains why
+  the unchanged copy of the errors along each shortcut stops the errors
+  shrinking away in deep models.
+- `calculateGradients`: delegates to `LN1`, `MHA`, `LN2` and `FF`.
+- No stored state of its own: everything is kept by the sub-components.
 
-**Check**
-- `checkGradients` for one parameter array from each of the four
-  sub-components, and the input errors.
-- A shortcut test: with every weight in `MHA` and `FF` set to 0, the input
-  errors equal the output errors exactly.
+**Check:** `Transformer.test.ts` (3 tests): a gradient check of one
+parameter array from every trainable stage, plus the input errors; the same
+check with both dropouts at 0.3 (reseeding before each forward pass); a
+**shortcut test**: with the last layer of each branch set to zero (the
+attention output projection and the feed forward second layer), the input
+errors exactly equal the output errors.
 
 ---
 
-## Step 12: `Embedding` backpropagation
+## Step 12: `Embedding` backpropagation ✅ done
 
 **Forward:** `e[t] = Tok[id_t] + Pos[t]`.
 
-**Changes**
+**What was done**
+- The private matrices became `_textEmbeddingMatrix` and
+  `_positionEmbeddingMatrix`, with public read-only getters
+  `textEmbeddingMatrix` and `positionEmbeddingMatrix`. These are the names
+  `WeightInitialization.test.ts` already used through a cast, so it still
+  works.
 - `getEmbeddingFromTokens` stores `tokenIds`.
-- `backpropagate(dE)`: stores `dE`. Returns nothing: token ids are not
-  differentiable, so backpropagation stops here (worth a comment).
-- `calculateGradients`:
-  - `dTok[id_t] += dE[t]` for every position: only rows of tokens in the
-    window are non-zero, and a token that appears twice receives both
-    contributions;
-  - `dPos[t] += dE[t]`.
-- `dTok` is a dense full-size matrix, for clarity. A comment can mention that
-  real implementations treat it as sparse.
-- `textEmbeddingMatrix` and `positionEmbeddingMatrix` are private. Add
-  read-only getters for them (and their gradients), so the gradient check
-  can nudge their values and `updateWeights` can be tested.
+- `backpropagate(dE)`: stores `dE` and returns nothing; the comment
+  explains that token ids cannot be nudged, so backpropagation ends here.
+- `calculateGradients`: `dTok[id_t] += dE[t]` and `dPos[t] += dE[t]`, adding
+  into row views from `getRow`. The comment explains the repeated-token case
+  and that the dense token gradient matrix is simple but wasteful.
+- Public fields: `textEmbeddingGradients`, `positionEmbeddingGradients`,
+  `gradientCount`.
 
-**Check**
-- `checkGradients` with a token sequence that **repeats a token id**,
-  sampling rows that appear in the window, and rows that do not (whose
-  gradient must be exactly 0).
+**Check:** 4 new tests in `Embedding.test.ts`, with the token ids
+`[5, 9, 5, 2]` (token 5 repeated):
+- a gradient check of the rows of tokens 5, 9 and 2 (passed as row views,
+  so nudging a row nudges the matrix) and of the whole position matrix;
+- token 5's gradient is the sum of the errors at positions 0 and 2, and
+  every other row of the 50,257 is exactly zero;
+- unused positions get no gradient;
+- errors for the wrong number of tokens are rejected.
+
+**State after step 12:** 139 tests, all passing. Every component can now
+backpropagate and calculate its gradients. Next: step 13 connects them
+through `GPTModel`.
 
 ---
 

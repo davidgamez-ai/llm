@@ -1,7 +1,40 @@
 import Hyperparameters from "./Hyperparameters.js";
 import { randomNormalMatrix, residualProjectionStandardDeviation } from "./WeightInitialization.js";
-import Matrix, { vectorTimesMatrix } from "./Matrix.js";
+import Matrix, { vectorTimesMatrix, matrixTimesVector, addOuterProduct, addToVector, runningMean } from "./Matrix.js";
 import DEBUG from "./Debug.js";
+/** sqrt(2 / pi), used by the tanh approximation of GELU. */
+const GELU_SCALE = Math.sqrt(2 / Math.PI);
+/**
+ * GELU, using the tanh approximation from the original GPT-2 code:
+ *
+ *     gelu(x) = 0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3)))
+ *
+ * Unlike ReLU it is smooth and lets small negative values through, which
+ * gives non-zero gradients for negative inputs.
+ *
+ * @param x - The input value.
+ * @returns GELU of x.
+ */
+export function gelu(x) {
+    return 0.5 * x * (1 + Math.tanh(GELU_SCALE * (x + 0.044715 * x ** 3)));
+}
+/**
+ * The slope of gelu at x, used to pass errors back through it. Writing
+ * u = sqrt(2 / pi) * (x + 0.044715 * x^3), so that gelu(x) = 0.5 * x * (1 + tanh(u)),
+ * the product rule and the chain rule (with d tanh(u)/du = 1 - tanh(u)^2) give
+ *
+ *     gelu'(x) = 0.5 * (1 + tanh(u)) + 0.5 * x * (1 - tanh(u)^2) * sqrt(2 / pi) * (1 + 3 * 0.044715 * x^2)
+ *
+ * The first term is the slope of x with tanh(u) held fixed; the second is
+ * the effect of x on tanh(u).
+ *
+ * @param x - The input value.
+ * @returns The derivative of gelu at x.
+ */
+export function geluDerivative(x) {
+    const tanhU = Math.tanh(GELU_SCALE * (x + 0.044715 * x ** 3));
+    return 0.5 * (1 + tanhU) + 0.5 * x * (1 - tanhU * tanhU) * GELU_SCALE * (1 + 3 * 0.044715 * x * x);
+}
 /**
  * The position-wise feed forward network used in each GPT transformer
  * block: a linear layer that expands a token vector from embeddingSize
@@ -37,6 +70,26 @@ class FeedForward {
     linearLayerStandardDeviation;
     /** Number of transformer blocks in the model, used to scale the second layer's initial weights. */
     numberTransformerBlocks;
+    /** Gradients of firstLayerWeights, set by calculateGradients(). Empty until then. */
+    firstLayerWeightGradients = new Matrix(0, 0);
+    /** Gradients of firstLayerBiases, set by calculateGradients(). Empty until then, and always empty when bias is false. */
+    firstLayerBiasGradients = new Float32Array(0);
+    /** Gradients of secondLayerWeights, set by calculateGradients(). Empty until then. */
+    secondLayerWeightGradients = new Matrix(0, 0);
+    /** Gradients of secondLayerBiases, set by calculateGradients(). Empty until then, and always empty when bias is false. */
+    secondLayerBiasGradients = new Float32Array(0);
+    /** The number of windows averaged into the gradients. */
+    gradientCount = 0;
+    /** The token vectors given to the most recent update(), stored for calculating the gradients. */
+    inputs = [];
+    /** Each token's first layer output before GELU, stored for backpropagating through GELU. */
+    preActivations = [];
+    /** Each token's first layer output after GELU, stored for calculating the second layer's gradients. */
+    activations = [];
+    /** The errors given to the most recent backpropagate(), stored for calculating the second layer's gradients. */
+    outputErrors = [];
+    /** Each token's errors at the first layer's output (before GELU), stored for calculating the first layer's gradients. */
+    preActivationErrors = [];
     /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
     random;
     /**
@@ -101,28 +154,103 @@ class FeedForward {
      */
     update(tokens) {
         /*
-         * GELU using the tanh approximation from the original GPT-2 code:
-         * 0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3))).
-         * Unlike ReLU it is smooth and lets small negative values through,
-         * which gives non-zero gradients for negative inputs.
-         */
-        const gelu = (x) => 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x ** 3)));
-        /*
          * Each linear layer multiplies the vector by its weight matrix and adds
          * its biases (which are empty when bias is false): each output value is
          * the dot product of the vector with one column of the weight matrix,
          * plus that column's bias.
+         *
+         * The input, the first layer's output before GELU (the pre-activation)
+         * and after it (the activation) are stored for every token, because
+         * backpropagation and the gradients need them.
          */
+        this.inputs = tokens;
+        this.preActivations = [];
+        this.activations = [];
         const output = [];
         for (const token of tokens) {
-            const hidden = vectorTimesMatrix(token, this.firstLayerWeights, this.firstLayerBiases).map(gelu);
-            output.push(vectorTimesMatrix(hidden, this.secondLayerWeights, this.secondLayerBiases));
+            const preActivation = vectorTimesMatrix(token, this.firstLayerWeights, this.firstLayerBiases);
+            const activation = preActivation.map(gelu);
+            this.preActivations.push(preActivation);
+            this.activations.push(activation);
+            output.push(vectorTimesMatrix(activation, this.secondLayerWeights, this.secondLayerBiases));
         }
         if (DEBUG.FEED_FORWARD) {
             console.log("FeedForward| Output (one row per token):");
             console.table(output);
         }
         return output;
+    }
+    /**
+     * Passes the errors at the output back through the network to its input,
+     * one token at a time, and stores what calculateGradients() needs. This is
+     * the forward pass in reverse:
+     *
+     * 1. Second linear layer: each activation contributed to every output
+     *    through one row of secondLayerWeights, so its error is the dot product
+     *    of that row with the output errors: the weights transposed, which is
+     *    matrixTimesVector because the weights are stored input x output.
+     * 2. GELU: each pre-activation p only affects its own activation, so its
+     *    error is the activation's error times GELU's slope at p.
+     * 3. First linear layer: as in step 1, through firstLayerWeights.
+     *
+     * @param outputErrors - The errors at the output: one row per token, each embeddingSize values wide.
+     * @returns The errors at the input: one row per token, each embeddingSize values wide.
+     * @throws RangeError if outputErrors does not have one row per token given to the most recent update().
+     */
+    backpropagate(outputErrors) {
+        if (outputErrors.length !== this.inputs.length) {
+            throw new RangeError(`FeedForward| Expected errors for ${this.inputs.length} tokens (from the most recent update()); got ${outputErrors.length}`);
+        }
+        this.outputErrors = outputErrors;
+        this.preActivationErrors = [];
+        const inputErrors = [];
+        for (let token = 0; token < outputErrors.length; token++) {
+            const activationErrors = matrixTimesVector(this.secondLayerWeights, outputErrors[token]);
+            const preActivationErrors = activationErrors.map((error, i) => error * geluDerivative(this.preActivations[token][i]));
+            this.preActivationErrors.push(preActivationErrors);
+            inputErrors.push(matrixTimesVector(this.firstLayerWeights, preActivationErrors));
+        }
+        return inputErrors;
+    }
+    /**
+     * Calculates the gradients of both layers' weights and biases from the
+     * values stored by update() and the errors stored by backpropagate(). For
+     * each linear layer, weight (i, j) multiplied input i to produce output j,
+     * so for one token its gradient is input i times output j's error; each
+     * bias is added straight to its output, so its gradient is that output's
+     * error. The same weights are used for every token, so the gradients are
+     * summed over the tokens:
+     *
+     *     secondLayerWeightGradients = sum over tokens of activation ⊗ outputError
+     *     secondLayerBiasGradients   = sum over tokens of outputError
+     *     firstLayerWeightGradients  = sum over tokens of input ⊗ preActivationError
+     *     firstLayerBiasGradients    = sum over tokens of preActivationError
+     *
+     * The bias gradients are left empty when bias is false. As in dnn, the
+     * first window of a batch (batchAverage false) replaces the stored
+     * gradients, and each later window (batchAverage true) is folded into
+     * their running mean.
+     *
+     * @param batchAverage - False for the first window of a batch; true to average this window into the stored gradients.
+     */
+    calculateGradients(batchAverage) {
+        const firstLayerWeightGradients = new Matrix(this.embeddingSize, this.hiddenSize);
+        const firstLayerBiasGradients = new Float32Array(this.firstLayerBiases.length);
+        const secondLayerWeightGradients = new Matrix(this.hiddenSize, this.embeddingSize);
+        const secondLayerBiasGradients = new Float32Array(this.secondLayerBiases.length);
+        for (let token = 0; token < this.outputErrors.length; token++) {
+            addOuterProduct(secondLayerWeightGradients, this.activations[token], this.outputErrors[token]);
+            addOuterProduct(firstLayerWeightGradients, this.inputs[token], this.preActivationErrors[token]);
+            if (this.bias) {
+                addToVector(secondLayerBiasGradients, this.outputErrors[token]);
+                addToVector(firstLayerBiasGradients, this.preActivationErrors[token]);
+            }
+        }
+        this.gradientCount = batchAverage && this.gradientCount > 0 ? this.gradientCount + 1 : 1;
+        this.firstLayerWeightGradients = runningMean(this.firstLayerWeightGradients, firstLayerWeightGradients, this.gradientCount);
+        this.firstLayerBiasGradients = runningMean(this.firstLayerBiasGradients, firstLayerBiasGradients, this.gradientCount);
+        this.secondLayerWeightGradients = runningMean(this.secondLayerWeightGradients, secondLayerWeightGradients, this.gradientCount);
+        this.secondLayerBiasGradients = runningMean(this.secondLayerBiasGradients, secondLayerBiasGradients, this.gradientCount);
     }
     /**
      * Counts the trainable parameters in the network: the weights of both

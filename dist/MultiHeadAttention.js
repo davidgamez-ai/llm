@@ -1,7 +1,7 @@
 import Hyperparameters from "./Hyperparameters.js";
 import GPTAttention from "./GPTAttention.js";
 import { randomNormalMatrix, residualProjectionStandardDeviation } from "./WeightInitialization.js";
-import Matrix, { vectorTimesMatrix } from "./Matrix.js";
+import Matrix, { vectorTimesMatrix, matrixTimesVector, addOuterProduct, addToVector, runningMean } from "./Matrix.js";
 import DEBUG from "./Debug.js";
 /**
  * Runs several GPTAttention heads over the same token embeddings,
@@ -25,6 +25,16 @@ class MultiHeadAttention {
     outputProjectionWeights = new Matrix(0, 0);
     /** Output projection biases built by build(): embeddingSize values. */
     outputProjectionBiases = new Float32Array(0);
+    /** Gradients of outputProjectionWeights, set by calculateGradients(). Empty until then. */
+    outputProjectionWeightGradients = new Matrix(0, 0);
+    /** Gradients of outputProjectionBiases, set by calculateGradients(). Empty until then. */
+    outputProjectionBiasGradients = new Float32Array(0);
+    /** The number of windows averaged into the output projection's gradients. */
+    gradientCount = 0;
+    /** The concatenated context vectors from the most recent update(), stored for calculating the output projection's gradients. */
+    contextVectors = [];
+    /** The errors given to the most recent backpropagate(), stored for calculating the output projection's gradients. */
+    outputErrors = [];
     /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
     random;
     /**
@@ -131,7 +141,77 @@ class MultiHeadAttention {
             console.log("MultiHeadAttention| Projected context vectors (one row per token):");
             console.table(projectedVectors);
         }
+        // Stored for calculating the output projection's gradients.
+        this.contextVectors = contextVectors;
         return projectedVectors;
+    }
+    /**
+     * Passes the errors at the output back to the input embeddings, and
+     * stores them for calculateGradients(). This is update() in reverse:
+     *
+     * 1. Output projection: each concatenated context vector is passed back
+     *    through the projection's weights transposed (matrixTimesVector,
+     *    because the weights are stored input x output).
+     * 2. Concatenation: each row of errors is split back into one slice of
+     *    weightMatrixColumns values per head, in head order, and each head
+     *    passes its slice back through itself.
+     * 3. Every head was given the same embeddings, so the errors the heads
+     *    pass back are added together (errors from every place a value is used
+     *    are summed).
+     *
+     * @param outputErrors - The errors at the output: one row per token, each embeddingSize values wide.
+     * @returns The errors at the input embeddings: one row per token, each embeddingSize values wide.
+     * @throws RangeError if outputErrors does not have one row per token given to the most recent update().
+     */
+    backpropagate(outputErrors) {
+        if (outputErrors.length !== this.contextVectors.length) {
+            throw new RangeError(`MultiHeadAttention| Expected errors for ${this.contextVectors.length} tokens (from the most recent update()); got ${outputErrors.length}`);
+        }
+        this.outputErrors = outputErrors;
+        // 1. Back through the output projection.
+        const contextErrors = outputErrors.map((errors) => matrixTimesVector(this.outputProjectionWeights, errors));
+        // 2 and 3. Split the errors between the heads, pass each slice back through its head, and sum the results.
+        const inputErrors = contextErrors.map(() => new Array(this.embeddingSize).fill(0));
+        this.attentionHeads.forEach((head, headIndex) => {
+            const start = headIndex * head.weightMatrixColumns;
+            const headErrors = contextErrors.map((errors) => errors.slice(start, start + head.weightMatrixColumns));
+            const headInputErrors = head.backpropagate(headErrors);
+            for (let token = 0; token < inputErrors.length; token++) {
+                for (let e = 0; e < this.embeddingSize; e++) {
+                    inputErrors[token][e] += headInputErrors[token][e];
+                }
+            }
+        });
+        return inputErrors;
+    }
+    /**
+     * Calculates the gradients of the output projection from the
+     * concatenated context vectors stored by update() and the errors stored by
+     * backpropagate(), then asks every head to calculate its own. The
+     * projection is a linear layer, so:
+     *
+     *     outputProjectionWeightGradients = sum over tokens of contextVector ⊗ outputError
+     *     outputProjectionBiasGradients   = sum over tokens of outputError
+     *
+     * As in dnn, the first window of a batch (batchAverage false) replaces the
+     * stored gradients, and each later window (batchAverage true) is folded
+     * into their running mean.
+     *
+     * @param batchAverage - False for the first window of a batch; true to average this window into the stored gradients.
+     */
+    calculateGradients(batchAverage) {
+        const weightGradients = new Matrix(this.embeddingSize, this.embeddingSize);
+        const biasGradients = new Float32Array(this.embeddingSize);
+        for (let token = 0; token < this.outputErrors.length; token++) {
+            addOuterProduct(weightGradients, this.contextVectors[token], this.outputErrors[token]);
+            addToVector(biasGradients, this.outputErrors[token]);
+        }
+        this.gradientCount = batchAverage && this.gradientCount > 0 ? this.gradientCount + 1 : 1;
+        this.outputProjectionWeightGradients = runningMean(this.outputProjectionWeightGradients, weightGradients, this.gradientCount);
+        this.outputProjectionBiasGradients = runningMean(this.outputProjectionBiasGradients, biasGradients, this.gradientCount);
+        for (const head of this.attentionHeads) {
+            head.calculateGradients(batchAverage);
+        }
     }
     /**
      * Counts the trainable parameters: those of every attention head plus the

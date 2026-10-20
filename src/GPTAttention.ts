@@ -1,6 +1,6 @@
 import Hyperparameters from "./Hyperparameters.js";
 import { randomNormalMatrix } from "./WeightInitialization.js";
-import Matrix, { vectorTimesMatrix } from "./Matrix.js";
+import Matrix, { vectorTimesMatrix, matrixTimesVector, addOuterProduct, addToVector, runningMean } from "./Matrix.js";
 import Dropout from "./Dropout.js";
 import { softmax } from "./Loss.js";
 import DEBUG from "./Debug.js"
@@ -45,6 +45,45 @@ class GPTAttention {
 
   /** Standard deviation of the normal distribution (mean 0) used to initialize the weight matrices. GPT-2 uses 0.02. */
   standardDeviation: number;
+
+  /** Gradients of queryWeights, set by calculateGradients(). Empty until then. */
+  queryWeightGradients: Matrix = new Matrix(0, 0);
+
+  /** Gradients of keyWeights, set by calculateGradients(). Empty until then. */
+  keyWeightGradients: Matrix = new Matrix(0, 0);
+
+  /** Gradients of valueWeights, set by calculateGradients(). Empty until then. */
+  valueWeightGradients: Matrix = new Matrix(0, 0);
+
+  /** Gradients of queryBiases, set by calculateGradients(). Empty until then, and always empty when qkvBias is false. */
+  queryBiasGradients: Float32Array = new Float32Array(0);
+
+  /** Gradients of keyBiases, set by calculateGradients(). Empty until then, and always empty when qkvBias is false. */
+  keyBiasGradients: Float32Array = new Float32Array(0);
+
+  /** Gradients of valueBiases, set by calculateGradients(). Empty until then, and always empty when qkvBias is false. */
+  valueBiasGradients: Float32Array = new Float32Array(0);
+
+  /** The number of windows averaged into the gradients. */
+  gradientCount: number = 0;
+
+  /*
+   * Values stored by the most recent update() for backpropagation: the
+   * input embeddings, the queries, keys and values, and the attention
+   * weights before dropout (needed for the softmax) and after it (needed
+   * for the context vectors). One row per token.
+   */
+  private inputs: number[][] = [];
+  private queries: number[][] = [];
+  private keys: number[][] = [];
+  private values: number[][] = [];
+  private attentionWeights: number[][] = [];
+  private finalAttentionWeights: number[][] = [];
+
+  /** The errors of the queries, keys and values, stored by backpropagate() for calculating the gradients. One row per token. */
+  private queryErrors: number[][] = [];
+  private keyErrors: number[][] = [];
+  private valueErrors: number[][] = [];
 
   /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
   private readonly random: () => number;
@@ -304,7 +343,156 @@ class GPTAttention {
       console.table(contextVectors);
     }
 
+    // Stored for backpropagate() and calculateGradients(). The dropout mask is kept by attentionDropout.
+    this.inputs = embeddings;
+    this.queries = queries;
+    this.keys = keys;
+    this.values = values;
+    this.attentionWeights = attentionWeights;
+    this.finalAttentionWeights = finalAttentionWeights;
+
     return contextVectors;
+  }
+
+  /**
+   * Passes the errors at the context vectors back through the attention
+   * head to its input embeddings, and stores the errors of the queries,
+   * keys and values for calculateGradients(). Each step undoes one step of
+   * update(), in reverse order. Unlike the other components, attention mixes
+   * tokens: token i's context vector depends on tokens 0..i, so each token's
+   * errors collect contributions from every later token that attended to it.
+   *
+   * @param outputErrors - The errors at the context vectors: one row per token, each weightMatrixColumns values wide.
+   * @returns The errors at the input embeddings: one row per token, each embeddingSize values wide.
+   * @throws RangeError if outputErrors does not have one row per token given to the most recent update().
+   */
+  backpropagate(outputErrors: number[][]): number[][] {
+    const tokenCount = this.inputs.length;
+    if (outputErrors.length !== tokenCount) {
+      throw new RangeError(
+        `GPTAttention| Expected errors for ${tokenCount} tokens (from the most recent update()); got ${outputErrors.length}`
+      );
+    }
+
+    /*
+     * 1. Context vectors. context[i] = sum over j of finalWeight[i][j] * value[j],
+     *    so the error of final weight (i, j) is the dot product of context
+     *    i's error with value j, and value j's error collects context i's
+     *    error times finalWeight[i][j] from every token i that used it.
+     */
+    const finalWeightErrors: number[][] = [];
+    const valueErrors: number[][] = this.values.map((value) => value.map(() => 0));
+    for (let i = 0; i < tokenCount; i++) {
+      finalWeightErrors.push([]);
+      for (let j = 0; j < tokenCount; j++) {
+        let dotProduct = 0;
+        for (let d = 0; d < this.weightMatrixColumns; d++) {
+          dotProduct += outputErrors[i][d] * this.values[j][d];
+          valueErrors[j][d] += this.finalAttentionWeights[i][j] * outputErrors[i][d];
+        }
+        finalWeightErrors[i].push(dotProduct);
+      }
+    }
+
+    // 2. Dropout: dropped weights pass no error back; kept ones are scaled as they were in update().
+    const weightErrors: number[][] = this.attentionDropout.backpropagate(finalWeightErrors);
+
+    /*
+     * 3. Softmax, row by row. Each weight in a row depends on every score in
+     *    that row (they share the same total), which gives
+     *
+     *        scoreError[i][j] = weight[i][j] * (weightError[i][j] - sum over k of weight[i][k] * weightError[i][k])
+     *
+     *    The causal mask needs no special handling here: masked positions
+     *    have a weight of exactly 0, so their score errors are 0 too.
+     *
+     * 4. Scaling. Each score was divided by sqrt(weightMatrixColumns), so
+     *    its error is divided by the same amount.
+     */
+    const scale = Math.sqrt(this.weightMatrixColumns);
+    const scoreErrors: number[][] = this.attentionWeights.map((weights, i) => {
+      const weightedSum = weights.reduce((sum, weight, k) => sum + weight * weightErrors[i][k], 0);
+      return weights.map((weight, j) => (weight * (weightErrors[i][j] - weightedSum)) / scale);
+    });
+
+    /*
+     * 5. Scores. score[i][j] = query[i] · key[j], so query i's error collects
+     *    key j times score (i, j)'s error over every j, and key j's error
+     *    collects query i times score (i, j)'s error over every i.
+     */
+    const queryErrors: number[][] = this.queries.map((query) => query.map(() => 0));
+    const keyErrors: number[][] = this.keys.map((key) => key.map(() => 0));
+    for (let i = 0; i < tokenCount; i++) {
+      for (let j = 0; j < tokenCount; j++) {
+        for (let d = 0; d < this.weightMatrixColumns; d++) {
+          queryErrors[i][d] += scoreErrors[i][j] * this.keys[j][d];
+          keyErrors[j][d] += scoreErrors[i][j] * this.queries[i][d];
+        }
+      }
+    }
+
+    this.queryErrors = queryErrors;
+    this.keyErrors = keyErrors;
+    this.valueErrors = valueErrors;
+
+    /*
+     * 6. Input embeddings. Each embedding was projected into a query, a key
+     *    and a value, so its error is the sum of the errors passed back
+     *    through all three projections (errors from every place a value is
+     *    used are added together). Each projection is passed back through
+     *    its weights transposed: matrixTimesVector, because the weights are
+     *    stored input x output.
+     */
+    return this.inputs.map((_, t) => {
+      const fromQuery = matrixTimesVector(this.queryWeights, queryErrors[t]);
+      const fromKey = matrixTimesVector(this.keyWeights, keyErrors[t]);
+      const fromValue = matrixTimesVector(this.valueWeights, valueErrors[t]);
+      return fromQuery.map((error, e) => error + fromKey[e] + fromValue[e]);
+    });
+  }
+
+  /**
+   * Calculates the gradients of the query, key and value weights (and
+   * biases, when qkvBias is true) from the input embeddings stored by
+   * update() and the errors stored by backpropagate(). Each projection is a
+   * linear layer, so its weight gradient is the outer product of the input
+   * embedding with the projection's errors, summed over the tokens:
+   *
+   *     queryWeightGradients = sum over tokens of embedding ⊗ queryError
+   *
+   * and likewise for the keys and values. Each bias gradient is the sum of
+   * the projection's errors. As in dnn, the first window of a batch
+   * (batchAverage false) replaces the stored gradients, and each later
+   * window (batchAverage true) is folded into their running mean.
+   *
+   * @param batchAverage - False for the first window of a batch; true to average this window into the stored gradients.
+   */
+  calculateGradients(batchAverage: boolean): void {
+    const queryWeightGradients = new Matrix(this.embeddingSize, this.weightMatrixColumns);
+    const keyWeightGradients = new Matrix(this.embeddingSize, this.weightMatrixColumns);
+    const valueWeightGradients = new Matrix(this.embeddingSize, this.weightMatrixColumns);
+    const queryBiasGradients = new Float32Array(this.queryBiases.length);
+    const keyBiasGradients = new Float32Array(this.keyBiases.length);
+    const valueBiasGradients = new Float32Array(this.valueBiases.length);
+
+    for (let token = 0; token < this.inputs.length; token++) {
+      addOuterProduct(queryWeightGradients, this.inputs[token], this.queryErrors[token]);
+      addOuterProduct(keyWeightGradients, this.inputs[token], this.keyErrors[token]);
+      addOuterProduct(valueWeightGradients, this.inputs[token], this.valueErrors[token]);
+      if (this.qkvBias) {
+        addToVector(queryBiasGradients, this.queryErrors[token]);
+        addToVector(keyBiasGradients, this.keyErrors[token]);
+        addToVector(valueBiasGradients, this.valueErrors[token]);
+      }
+    }
+
+    this.gradientCount = batchAverage && this.gradientCount > 0 ? this.gradientCount + 1 : 1;
+    this.queryWeightGradients = runningMean(this.queryWeightGradients, queryWeightGradients, this.gradientCount);
+    this.keyWeightGradients = runningMean(this.keyWeightGradients, keyWeightGradients, this.gradientCount);
+    this.valueWeightGradients = runningMean(this.valueWeightGradients, valueWeightGradients, this.gradientCount);
+    this.queryBiasGradients = runningMean(this.queryBiasGradients, queryBiasGradients, this.gradientCount);
+    this.keyBiasGradients = runningMean(this.keyBiasGradients, keyBiasGradients, this.gradientCount);
+    this.valueBiasGradients = runningMean(this.valueBiasGradients, valueBiasGradients, this.gradientCount);
   }
 
   /**

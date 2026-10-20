@@ -1,4 +1,5 @@
 import Hyperparameters from "./Hyperparameters.js";
+import { runningMean } from "./Matrix.js";
 
 /**
  * Layer normalization, as in GPT-2 and PyTorch's nn.LayerNorm. Normalizes
@@ -23,6 +24,24 @@ class LayerNormalization {
 
   /** Trainable shift (beta), added to each scaled value: embeddingSize values, initialized to 0. */
   shift: Float32Array;
+
+  /** Gradients of the loss with respect to scale, set by calculateGradients(). Empty until then. */
+  scaleGradients: Float32Array = new Float32Array(0);
+
+  /** Gradients of the loss with respect to shift, set by calculateGradients(). Empty until then. */
+  shiftGradients: Float32Array = new Float32Array(0);
+
+  /** The number of windows averaged into scaleGradients and shiftGradients. */
+  gradientCount: number = 0;
+
+  /** The normalized values (x̂, before scale and shift) of each token in the most recent update(), stored for backpropagation. */
+  private normalized: number[][] = [];
+
+  /** The standard deviation (σ, including epsilon) of each token in the most recent update(), stored for backpropagation. */
+  private standardDeviations: number[] = [];
+
+  /** The errors given to the most recent backpropagate(), stored for calculating the gradients. */
+  private outputErrors: number[][] = [];
 
   /**
    * Creates a LayerNormalization, copying embeddingSize from the given
@@ -57,6 +76,10 @@ class LayerNormalization {
   update(vectors: number[][]): number[][] {
     const output: number[][] = [];
 
+    // Each token's normalized values and standard deviation are stored for backpropagate().
+    this.normalized = [];
+    this.standardDeviations = [];
+
     for (let token = 0; token < vectors.length; token++) {
       const values = vectors[token];
       if (values.length !== this.embeddingSize) {
@@ -76,15 +99,102 @@ class LayerNormalization {
       const standardDeviation = Math.sqrt(variance + LayerNormalization.epsilon);
 
       // Normalize each value, then apply that dimension's own scale and shift.
+      const normalizedValues: number[] = [];
       const normalizedVector: number[] = [];
       for (let i = 0; i < values.length; i++) {
         const normalized = (values[i] - mean) / standardDeviation;
+        normalizedValues.push(normalized);
         normalizedVector.push(this.scale[i] * normalized + this.shift[i]);
       }
       output.push(normalizedVector);
+      this.normalized.push(normalizedValues);
+      this.standardDeviations.push(standardDeviation);
     }
 
     return output;
+  }
+
+  /**
+   * Passes the errors at the output back to the input, and stores them for
+   * calculateGradients(). Each token is independent, so each is handled
+   * separately.
+   *
+   * The output is y = scale * x̂ + shift, so the errors at the normalized
+   * values are x̂Error = outputError * scale. Getting from there to the
+   * input x is harder, because each x̂[i] = (x[i] - mean) / σ depends on
+   * every input value through the mean and σ. Working through the
+   * derivatives gives, with n = embeddingSize:
+   *
+   *     inputError = (1 / σ) * (x̂Error - mean(x̂Error) - x̂ * mean(x̂Error * x̂))
+   *
+   * The three terms are the three paths from x[i] to the loss:
+   * - x̂Error / σ: the direct path, x[i] changing x̂[i];
+   * - - mean(x̂Error) / σ: through the mean. Raising any x[i] raises the mean,
+   *   which lowers every x̂[j] equally;
+   * - - x̂ * mean(x̂Error * x̂) / σ: through σ. Raising x[i] changes the
+   *   spread, which rescales every x̂[j] in proportion to its size.
+   * A consequence is that the input errors of each token sum to 0: adding
+   * the same amount to every input value changes nothing after normalization.
+   *
+   * @param outputErrors - The errors at the output: one row per token, each embeddingSize values wide.
+   * @returns The errors at the input: one row per token, each embeddingSize values wide.
+   * @throws RangeError if outputErrors does not have one row per token given to the most recent update().
+   */
+  backpropagate(outputErrors: number[][]): number[][] {
+    if (outputErrors.length !== this.normalized.length) {
+      throw new RangeError(
+        `LayerNormalization| Expected errors for ${this.normalized.length} tokens (from the most recent update()); got ${outputErrors.length}`
+      );
+    }
+    this.outputErrors = outputErrors;
+
+    const inputErrors: number[][] = [];
+    for (let token = 0; token < outputErrors.length; token++) {
+      const normalized = this.normalized[token];
+      const n = normalized.length;
+
+      // Errors at the normalized values: each output is scale[i] times x̂[i] plus shift[i].
+      const normalizedErrors: number[] = outputErrors[token].map((error, i) => error * this.scale[i]);
+
+      // The two means in the formula.
+      const meanError = normalizedErrors.reduce((sum, error) => sum + error, 0) / n;
+      const meanErrorTimesNormalized = normalizedErrors.reduce((sum, error, i) => sum + error * normalized[i], 0) / n;
+
+      const standardDeviation = this.standardDeviations[token];
+      inputErrors.push(normalizedErrors.map((error, i) =>
+        (error - meanError - normalized[i] * meanErrorTimesNormalized) / standardDeviation
+      ));
+    }
+    return inputErrors;
+  }
+
+  /**
+   * Calculates the gradients of scale and shift from the normalized values
+   * stored by update() and the errors stored by backpropagate(). Each output
+   * is y[i] = scale[i] * x̂[i] + shift[i], so for one token scale[i]'s
+   * gradient is outputError[i] * x̂[i], and shift[i]'s is outputError[i].
+   * The same scale and shift are used for every token, so the gradients are
+   * summed over the tokens.
+   *
+   * As in dnn, the first window of a batch (batchAverage false) replaces the
+   * stored gradients, and each later window (batchAverage true) is folded
+   * into their running mean.
+   *
+   * @param batchAverage - False for the first window of a batch; true to average this window into the stored gradients.
+   */
+  calculateGradients(batchAverage: boolean): void {
+    const scaleGradients = new Float32Array(this.embeddingSize);
+    const shiftGradients = new Float32Array(this.embeddingSize);
+    for (let token = 0; token < this.outputErrors.length; token++) {
+      for (let i = 0; i < this.embeddingSize; i++) {
+        scaleGradients[i] += this.outputErrors[token][i] * this.normalized[token][i];
+        shiftGradients[i] += this.outputErrors[token][i];
+      }
+    }
+
+    this.gradientCount = batchAverage && this.gradientCount > 0 ? this.gradientCount + 1 : 1;
+    this.scaleGradients = runningMean(this.scaleGradients, scaleGradients, this.gradientCount);
+    this.shiftGradients = runningMean(this.shiftGradients, shiftGradients, this.gradientCount);
   }
 
   /**

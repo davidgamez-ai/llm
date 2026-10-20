@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import createSeededRandom from "../SeededRandom.js";
 /**
+ * Builds a matrix of seeded random values, uniformly spread between -scale
+ * and scale, for use as a component's inputs in a gradient check.
+ *
+ * @param rows - The number of rows, e.g. tokens.
+ * @param columns - The number of columns, e.g. embeddingSize.
+ * @param seed - Seed for the random values, so tests are reproducible.
+ * @param scale - The largest possible size of a value. Defaults to 1.
+ * @returns The matrix as nested arrays, one inner array per row.
+ */
+export function randomMatrix(rows, columns, seed, scale = 1) {
+    const random = createSeededRandom(seed);
+    return Array.from({ length: rows }, () => Array.from({ length: columns }, () => scale * (2 * random() - 1)));
+}
+/**
  * Checks a component's hand-written gradients against numerical ones:
  *
  * 1. Runs forward(), builds a random matrix R the shape of the output, and

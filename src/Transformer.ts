@@ -123,6 +123,61 @@ class Transformer {
   }
 
   /**
+   * Passes the errors at the block's output back to its input. The block
+   * computed
+   *
+   *     shortcutOutput = input + attentionOutputDropout(multiHeadAttention(attentionLayerNormalization(input)))
+   *     output = shortcutOutput + feedForwardOutputDropout(feedForward(feedForwardLayerNormalization(shortcutOutput)))
+   *
+   * so the errors are passed back through each stage in reverse order. At
+   * each shortcut connection the value was used in two places, so its error
+   * is the sum of the errors from both: the errors arriving on the shortcut
+   * are copied straight through, unchanged, and the errors that come back
+   * through the branch are added to them. That unchanged copy is why
+   * shortcut connections help deep networks train: however many blocks
+   * there are, the errors at the output reach every block's input without
+   * having to pass through any weights, so they do not shrink away.
+   *
+   * Each stage stores what it needs for calculateGradients() as the errors
+   * pass through it.
+   *
+   * @param outputErrors - The errors at the block's output: one row per token, each embeddingSize values wide.
+   * @returns The errors at the block's input: one row per token, each embeddingSize values wide.
+   */
+  backpropagate(outputErrors: number[][]): number[][] {
+    // Back through the feed forward branch: dropout, feed forward network, layer normalization.
+    const feedForwardOutputErrors = this.feedForwardOutputDropout.backpropagate(outputErrors);
+    const normalizedShortcutErrors = this.feedForward.backpropagate(feedForwardOutputErrors);
+    const feedForwardBranchErrors = this.feedForwardLayerNormalization.backpropagate(normalizedShortcutErrors);
+
+    // Second shortcut: the output errors pass straight through and the feed forward branch's errors are added.
+    const shortcutOutputErrors = this.add(outputErrors, feedForwardBranchErrors);
+
+    // Back through the attention branch: dropout, multi-head attention, layer normalization.
+    const attentionOutputErrors = this.attentionOutputDropout.backpropagate(shortcutOutputErrors);
+    const normalizedEmbeddingErrors = this.multiHeadAttention.backpropagate(attentionOutputErrors);
+    const attentionBranchErrors = this.attentionLayerNormalization.backpropagate(normalizedEmbeddingErrors);
+
+    // First shortcut: the errors pass straight through and the attention branch's errors are added.
+    return this.add(shortcutOutputErrors, attentionBranchErrors);
+  }
+
+  /**
+   * Calculates the gradients of every trainable stage in the block from
+   * the values each stored during update() and backpropagate(). The
+   * dropouts and shortcut connections have no parameters, so have no
+   * gradients.
+   *
+   * @param batchAverage - False for the first window of a batch; true to average this window into the stored gradients.
+   */
+  calculateGradients(batchAverage: boolean): void {
+    this.attentionLayerNormalization.calculateGradients(batchAverage);
+    this.multiHeadAttention.calculateGradients(batchAverage);
+    this.feedForwardLayerNormalization.calculateGradients(batchAverage);
+    this.feedForward.calculateGradients(batchAverage);
+  }
+
+  /**
    * Adds two matrices of token vectors element by element, as a shortcut
    * connection does: output[token][index] = first[token][index] + second[token][index].
    *
