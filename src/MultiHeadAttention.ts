@@ -2,6 +2,7 @@ import Hyperparameters from "./Hyperparameters.js";
 import GPTAttention from "./GPTAttention.js";
 import { randomNormalMatrix, residualProjectionStandardDeviation } from "./WeightInitialization.js";
 import Matrix, { vectorTimesMatrix, matrixTimesVector, addOuterProduct, addToVector, runningMean } from "./Matrix.js";
+import AdamW from "./AdamW.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -251,6 +252,22 @@ class MultiHeadAttention {
 
     for (const head of this.attentionHeads) {
       head.calculateGradients(batchAverage);
+    }
+  }
+
+  /**
+   * Updates the output projection's weights and biases from the gradients
+   * calculated by calculateGradients(), using the shared optimizer, then
+   * asks every head to update its own. Weight decay is applied to the
+   * weights but not to the biases.
+   *
+   * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+   */
+  updateWeights(optimizer: AdamW): void {
+    optimizer.updateMatrix(this.outputProjectionWeights, this.outputProjectionWeightGradients, true);
+    optimizer.updateVector(this.outputProjectionBiases, this.outputProjectionBiasGradients, false);
+    for (const head of this.attentionHeads) {
+      head.updateWeights(optimizer);
     }
   }
 

@@ -214,6 +214,21 @@ class MultiHeadAttention {
         }
     }
     /**
+     * Updates the output projection's weights and biases from the gradients
+     * calculated by calculateGradients(), using the shared optimizer, then
+     * asks every head to update its own. Weight decay is applied to the
+     * weights but not to the biases.
+     *
+     * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+     */
+    updateWeights(optimizer) {
+        optimizer.updateMatrix(this.outputProjectionWeights, this.outputProjectionWeightGradients, true);
+        optimizer.updateVector(this.outputProjectionBiases, this.outputProjectionBiasGradients, false);
+        for (const head of this.attentionHeads) {
+            head.updateWeights(optimizer);
+        }
+    }
+    /**
      * Counts the trainable parameters: those of every attention head plus the
      * output projection's weights and biases. The concatenation itself has no
      * parameters.

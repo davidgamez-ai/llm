@@ -655,58 +655,119 @@ not connected to the model yet; that is step 15.
 
 ---
 
-## Step 15: `updateWeights` in every component
+## Step 15: `updateWeights` in every component ✅ done
 
-**Changes**
-- Every component with parameters gets `updateWeights(optimizer)`:
-  - **weight decay on**: all weight matrices and both embedding matrices;
-  - **weight decay off**: all biases and layer-norm scale and shift (as in
-    dnn and GPT-2 practice; the book decays everything, so add a comment).
+**What was done**
+- Every component with parameters has `updateWeights(optimizer: AdamW)`:
+  `Embedding`, `LayerNormalization`, `FeedForward`, `GPTAttention`,
+  `MultiHeadAttention` (which also calls each head's) and
+  `LinearOutputLayer`. `Transformer` delegates to its four trainable
+  stages.
+  - **Weight decay on**: every weight matrix and both embedding matrices.
+  - **Weight decay off**: every bias, and layer-norm scale and shift. The
+    comments explain why: decaying `scale` would pull it towards 0 rather
+    than its natural value of 1, and a bias multiplies nothing, so a large
+    one does no harm. The `LayerNormalization` comment notes that the book
+    decays every parameter.
+  - Biases are only updated when they exist (`feedForwardBias`, `qkvBias`).
+  - The `Embedding` comment explains that every row is updated, including
+    rows with a zero gradient this batch, which still move through AdamW's
+    momentum and weight decay.
 - `GPTModel.updateWeights(optimizer)` calls `optimizer.step()` once, then
-  every component's `updateWeights`, as dnn's `MNISTNetwork` does.
+  every component's `updateWeights`, as dnn's `MNISTNetwork` does. Its
+  comment says the optimizer must be kept for the whole of training, so its
+  running averages carry over.
+- `AdamW`'s size errors now add "The gradients are empty: has
+  calculateGradients() been called?" when the gradients are empty, which is
+  what happens if `updateWeights` is called first.
 
-**Check**
-- One-step test on a tiny model: run forward, backpropagate,
-  `calculateGradients(false)`, `updateWeights` on one window, then measure
-  the loss on the **same** window in `VALIDATION_MODE` before and after. The
-  loss must decrease.
-- Every parameter array in the model changes after the update. (Even
-  token-embedding rows for tokens not in the window change, because weight
-  decay shrinks them.)
+**Check:** 5 new tests in `src/test/GPTModel.test.ts`. They use a helper,
+`allParameters(model)`, that lists every parameter array, its gradients and
+whether it should be decayed. The helper is written independently of the
+model's `updateWeights` methods, so the tests check them.
+- The helper's arrays add up to `getParameterCount()`, so it misses nothing.
+- **The loss falls at every step**: five training steps on one window, each
+  lowering the loss on that same window (measured in `VALIDATION_MODE`).
+  Over 20 steps the loss falls from 10.93 to 9.60.
+- Every parameter array changes after one update.
+- **Weight decay goes to the right arrays**: with every gradient set to 0,
+  so the only possible change is decay, each decayed value equals exactly
+  `fround(p − learningRate · weightDecay · p)` and every other value is
+  exactly unchanged.
+- `updateWeights` before `calculateGradients` gives the explanatory error.
+
+**State after step 15:** 162 tests, all passing; `node dist/index.js` still
+generates the same text. The model can now learn; step 16 connects it to the
+trainer.
 
 ---
 
-## Step 16: The training loop in `Trainer`
+## Step 16: The training loop in `Trainer` ✅ done
 
-**Changes**
-- `train()` becomes the dnn loop, per window instead of per image:
+**What was done**
+- The `AdamW` optimizer is a private field created in the **constructor**,
+  not in `train()`, so its running averages carry over between batches,
+  between epochs, and between calls to `train()`.
+- New private method `trainOnBatch(batch): number`, the dnn loop per window
+  instead of per image, with a numbered comment for each step:
 
   ```
-  optimizer = new AdamW(hyperparameters)          // created once, so its moments persist across epochs
-  for each epoch:
-    shuffle windows; create batches
-    for each batch:
-      for each window (index w) in the batch:
-        logits = model.update(window.inputs)                                    // forward
-        loss  += Σ_t crossEntropyLoss(logits[t], window.targets[t])
-        errors = logits.map((row, t) => crossEntropyErrors(row, window.targets[t], 1 / contextLength))
-        model.backpropagate(errors)                                             // errors flow backwards
-        model.calculateGradients(w !== 0)                                       // first window replaces, the rest average
-      model.updateWeights(optimizer)                                            // one AdamW step per batch
-    validation loss (unchanged: forward only, VALIDATION_MODE)
+  for each window (index w) in the batch:
+    logits = model.update(window.inputs)                          // 1. forward
+    loss  += Σ_t crossEntropyLoss(logits[t], targets[t])          // 2. loss
+    errors = crossEntropyErrors(logits[t], targets[t], 1 / length) // 3. errors at the logits
+    model.backpropagate(errors)                                   // 4. errors flow backwards
+    model.calculateGradients(w !== 0)                             // 5. first window replaces, the rest average
+  model.updateWeights(optimizer)                                  // one AdamW step per batch
+  return loss / tokens
   ```
 
-- Remove the "Weights are not updated yet" comments; update the
-  `numberEpochs` documentation in `Hyperparameters` (more epochs now give
-  different losses).
+- `train()` calls `trainOnBatch` for each batch, in place of the old
+  forward-only `calculateBatchLoss`, which is now only used for validation.
+  Validation is unchanged: forward only, in `VALIDATION_MODE`.
+- The "Weights are not updated yet" comments are gone; the class comment
+  describes backpropagation, gradient averaging and the per-batch update.
+  `EpochLoss.trainingLoss` notes that each batch's loss is measured before
+  that batch's update.
+- `Hyperparameters` `numberEpochs` documentation no longer says that more
+  epochs only take time.
 
-**Check**
-- Existing `Trainer` tests still pass (mode restoration, shuffling, window
-  counts).
-- New **overfitting test**: a tiny model trained for ~10 epochs on a short,
-  repetitive text gives a final training loss well below the first epoch's
-  and below `ln(vocabularySize)` ≈ 10.8.
-- Validation loss changes between epochs (previously identical).
+**Check:** `src/test/Trainer.test.ts`, 3 new tests (10 in all):
+- **Order of calls**: spies on the model record that every batch is
+  exactly `calculateGradients(false)`, `calculateGradients(true)`,
+  `calculateGradients(true)`, `updateWeights` (batchSize 3).
+- **Training changes the model**: the output layer's weights change, and
+  the validation loss differs between epochs (it used to be identical).
+- **Overfitting**: on two sentences repeated six times, with a learning
+  rate of 0.02, 8 epochs take the training loss from 10.32 to 1.17 and the
+  validation loss to 1.02. The test requires a final training loss below 3
+  and below a third of the first epoch's, and a final validation loss below
+  3. (At the default learning rate of 0.0004, 10 epochs only reach 10.15,
+  too slow for a unit test.)
+- Existing tests (window counts, mode restoration, shuffling, deterministic
+  validation, too little text) still pass.
+
+**Test time:** training now runs backpropagation and an update for every
+window, which took the suite from 18 to 88 seconds. The training tests now
+use a 40-sentence text (about 400 tokens) instead of 200 sentences, which
+brought it back to 34 seconds. The untrained validation-loss reference test
+keeps the original 200-sentence text, because its recorded value depends on
+it.
+
+**Speed note for step 17:** even with embeddingSize 8, each window takes
+about 40 ms, almost all of it spent on vocabulary-sized arrays (50,257 rows):
+- two softmaxes per position, one for the loss and one for the errors;
+- the output layer's forward pass, backward pass and gradients;
+- a new full-size gradient matrix per window for the output layer and the
+  token embedding, plus their running means;
+- AdamW over both matrices once per batch.
+
+These costs grow with embeddingSize, so the demo configuration in C2 will
+be several times slower per window. That is acceptable for clarity, but
+step 17 should time an epoch before committing to the full number.
+
+**State after step 16:** 165 tests, all passing. `Trainer.train()` now
+trains the model.
 
 ---
 

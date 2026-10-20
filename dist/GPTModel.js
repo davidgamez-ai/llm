@@ -134,6 +134,25 @@ class GPTModel {
         this.linearOutputLayer.calculateGradients(batchAverage);
     }
     /**
+     * Updates every trainable parameter in the model from the gradients
+     * calculated by calculateGradients(): one optimization step. Called once
+     * per batch, after the gradients of every window in the batch have been
+     * calculated and averaged. As in dnn, the optimizer's step() is called
+     * first, then each component updates its own parameters.
+     *
+     * @param optimizer - The AdamW optimizer, shared by every component and kept for the whole of training, so its running averages carry over from batch to batch.
+     * @throws RangeError if calculateGradients() has not been called, since there are then no gradients to update from.
+     */
+    updateWeights(optimizer) {
+        optimizer.step();
+        this.embedding.updateWeights(optimizer);
+        for (const transformer of this.transformers) {
+            transformer.updateWeights(optimizer);
+        }
+        this.finalLayerNormalization.updateWeights(optimizer);
+        this.linearOutputLayer.updateWeights(optimizer);
+    }
+    /**
      * Counts the trainable parameters in the whole model: the embedding, every
      * transformer block, the final layer normalization and the linear output
      * layer. Dropout has no parameters.

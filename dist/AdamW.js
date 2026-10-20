@@ -44,6 +44,17 @@ class AdamW {
     constructor(hyperparameters) {
         this.hyperparameters = hyperparameters;
     }
+    /**
+     * Explains the most likely cause of empty gradients, for error messages:
+     * every component's gradients are empty until its calculateGradients()
+     * is first called.
+     *
+     * @param gradientCount - The number of gradients received.
+     * @returns A hint to append to the error message, or an empty string if there were gradients.
+     */
+    static emptyGradientsHint(gradientCount) {
+        return gradientCount === 0 ? ". The gradients are empty: has calculateGradients() been called?" : "";
+    }
     /** The number of times step() has been called. */
     get stepCount() {
         return this._stepCount;
@@ -68,7 +79,8 @@ class AdamW {
      */
     updateMatrix(weights, gradients, applyWeightDecay = true) {
         if (gradients.rows !== weights.rows || gradients.columns !== weights.columns) {
-            throw new RangeError(`AdamW| Gradients are ${gradients.rows} x ${gradients.columns}; the weights are ${weights.rows} x ${weights.columns}`);
+            throw new RangeError(`AdamW| Gradients are ${gradients.rows} x ${gradients.columns}; the weights are ${weights.rows} x ${weights.columns}` +
+                AdamW.emptyGradientsHint(gradients.size));
         }
         this.updateVector(weights.data, gradients.data, applyWeightDecay);
     }
@@ -101,7 +113,7 @@ class AdamW {
             throw new Error("AdamW| Call step() before updating parameters.");
         }
         if (gradients.length !== parameters.length) {
-            throw new RangeError(`AdamW| Got ${gradients.length} gradients for ${parameters.length} parameters`);
+            throw new RangeError(`AdamW| Got ${gradients.length} gradients for ${parameters.length} parameters` + AdamW.emptyGradientsHint(gradients.length));
         }
         // The first time an array is updated, its running averages start at 0.
         let moments = this.moments.get(parameters);

@@ -1,6 +1,7 @@
 import Hyperparameters from "./Hyperparameters.js";
 import { randomNormalMatrix, residualProjectionStandardDeviation } from "./WeightInitialization.js";
 import Matrix, { vectorTimesMatrix, matrixTimesVector, addOuterProduct, addToVector, runningMean } from "./Matrix.js";
+import AdamW from "./AdamW.js";
 import DEBUG from "./Debug.js";
 
 /** sqrt(2 / pi), used by the tanh approximation of GELU. */
@@ -295,6 +296,24 @@ class FeedForward {
     this.firstLayerBiasGradients = runningMean(this.firstLayerBiasGradients, firstLayerBiasGradients, this.gradientCount);
     this.secondLayerWeightGradients = runningMean(this.secondLayerWeightGradients, secondLayerWeightGradients, this.gradientCount);
     this.secondLayerBiasGradients = runningMean(this.secondLayerBiasGradients, secondLayerBiasGradients, this.gradientCount);
+  }
+
+  /**
+   * Updates both layers' weights and biases from the gradients calculated
+   * by calculateGradients(), using the shared optimizer. Weight decay is
+   * applied to the weights but not to the biases: a bias does not multiply
+   * anything, so a large one does not make the network overly sensitive to
+   * its inputs, and decaying it brings no benefit.
+   *
+   * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+   */
+  updateWeights(optimizer: AdamW): void {
+    optimizer.updateMatrix(this.firstLayerWeights, this.firstLayerWeightGradients, true);
+    optimizer.updateMatrix(this.secondLayerWeights, this.secondLayerWeightGradients, true);
+    if (this.bias) {
+      optimizer.updateVector(this.firstLayerBiases, this.firstLayerBiasGradients, false);
+      optimizer.updateVector(this.secondLayerBiases, this.secondLayerBiasGradients, false);
+    }
   }
 
   /**

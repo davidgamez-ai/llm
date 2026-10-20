@@ -253,6 +253,23 @@ class FeedForward {
         this.secondLayerBiasGradients = runningMean(this.secondLayerBiasGradients, secondLayerBiasGradients, this.gradientCount);
     }
     /**
+     * Updates both layers' weights and biases from the gradients calculated
+     * by calculateGradients(), using the shared optimizer. Weight decay is
+     * applied to the weights but not to the biases: a bias does not multiply
+     * anything, so a large one does not make the network overly sensitive to
+     * its inputs, and decaying it brings no benefit.
+     *
+     * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+     */
+    updateWeights(optimizer) {
+        optimizer.updateMatrix(this.firstLayerWeights, this.firstLayerWeightGradients, true);
+        optimizer.updateMatrix(this.secondLayerWeights, this.secondLayerWeightGradients, true);
+        if (this.bias) {
+            optimizer.updateVector(this.firstLayerBiases, this.firstLayerBiasGradients, false);
+            optimizer.updateVector(this.secondLayerBiases, this.secondLayerBiasGradients, false);
+        }
+    }
+    /**
      * Counts the trainable parameters in the network: the weights of both
      * linear layers plus their biases. The biases are empty, and so add
      * nothing, when bias is false.

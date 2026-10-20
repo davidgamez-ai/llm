@@ -1,7 +1,8 @@
 import * as fs from "fs";
 import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
-import { crossEntropyLoss } from "./Loss.js";
+import { crossEntropyLoss, crossEntropyErrors } from "./Loss.js";
+import AdamW from "./AdamW.js";
 import DEBUG from "./Debug.js";
 /**
  * Loads training data and trains the model on it, following the book's
@@ -13,12 +14,13 @@ import DEBUG from "./Debug.js";
  * - In each epoch the training windows are shuffled and grouped into batches
  *   of batchSize windows; a final incomplete batch is dropped.
  * - The loss of each batch is averaged over every token in the batch.
+ * - For each window in a batch, the errors at the logits are backpropagated
+ *   through the model and its gradients calculated; the gradients are
+ *   averaged over the windows of the batch, as in dnn's trainer.
+ * - At the end of each batch, the AdamW optimizer updates every weight in
+ *   the model once.
  * - At the end of each epoch the validation loss is calculated in
  *   VALIDATION_MODE, so dropout is off.
- *
- * Weights are not updated yet: that needs backpropagation, which has not
- * been written. Until then the losses show how well the untrained model
- * predicts the next token.
  */
 class Trainer {
     /** The token ids of the training part of the most recently loaded file. Empty until load() is called. */
@@ -36,18 +38,25 @@ class Trainer {
     /** The model being trained. */
     model;
     /**
-     * Creates a Trainer for the given model, building its own tokenizer. The
-     * model is passed in rather than built here so that the same instance can
-     * be shared with a Generator, which then generates text with the trained
-     * weights.
+     * The optimizer that updates the model's weights. Created once, with the
+     * trainer, so that its running averages carry over from batch to batch,
+     * from epoch to epoch, and from one call of train() to the next.
+     */
+    optimizer;
+    /**
+     * Creates a Trainer for the given model, building its own tokenizer and
+     * AdamW optimizer. The model is passed in rather than built here so that
+     * the same instance can be shared with a Generator, which then generates
+     * text with the trained weights.
      *
-     * @param hyperparameters - The settings the model was built with; also the source of contextLength, batchSize, trainingRatio, numberEpochs and the random number stream used for shuffling, and the mode that train() switches between TRAINING_MODE and VALIDATION_MODE.
+     * @param hyperparameters - The settings the model was built with; also the source of contextLength, batchSize, trainingRatio, numberEpochs, the optimizer's settings and the random number stream used for shuffling, and the mode that train() switches between TRAINING_MODE and VALIDATION_MODE.
      * @param model - The model to train. Must have been built from the same hyperparameters.
      */
     constructor(hyperparameters, model) {
         this.hyperparameters = hyperparameters;
         this.tokenizer = new BPETokenizer();
         this.model = model;
+        this.optimizer = new AdamW(hyperparameters);
     }
     /**
      * Reads the given file, splits its text into a training part and a
@@ -71,11 +80,12 @@ class Trainer {
         }
     }
     /**
-     * Runs numberEpochs epochs over the training set. In each epoch the
-     * training windows are shuffled and grouped into batches of batchSize
-     * windows, dropping a final incomplete batch, and the loss of each batch is
-     * calculated in TRAINING_MODE. At the end of the epoch the validation loss
-     * is calculated, and both losses are logged.
+     * Trains the model for numberEpochs epochs over the training set. In each
+     * epoch the training windows are shuffled and grouped into batches of
+     * batchSize windows, dropping a final incomplete batch, and the model is
+     * trained on each batch in turn in TRAINING_MODE (see trainOnBatch). At
+     * the end of the epoch the validation loss is calculated, and both losses
+     * are logged.
      *
      * Hyperparameters.mode is changed while training runs and restored to its
      * original value afterwards, even if an error is thrown.
@@ -101,12 +111,8 @@ class Trainer {
                 const batches = this.createBatches(this.shuffle(trainingWindows), true);
                 let totalBatchLoss = 0;
                 for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-                    const batchLoss = this.calculateBatchLoss(batches[batchIndex]);
+                    const batchLoss = this.trainOnBatch(batches[batchIndex]);
                     totalBatchLoss += batchLoss;
-                    /*
-                     * Once backpropagation has been written, the gradients of batchLoss
-                     * will be calculated and the weights updated here, once per batch.
-                     */
                     if (DEBUG.TRAINER) {
                         console.log(`Trainer| Epoch ${epoch}. Batch ${batchIndex + 1} of ${batches.length}. Loss: ${batchLoss}.`);
                     }
@@ -125,6 +131,57 @@ class Trainer {
         finally {
             this.hyperparameters.mode = originalMode;
         }
+    }
+    /**
+     * Trains the model on one batch: the heart of training. For each window in
+     * the batch:
+     *
+     * 1. Forward pass: the window's inputs are fed through the model, giving
+     *    one row of logits per position.
+     * 2. Loss: the cross entropy of each position's logits against the token
+     *    that actually comes next, added up to measure how well the model did.
+     * 3. Errors: the gradient of the window's loss with respect to each logit,
+     *    softmax minus the one-hot target, scaled by 1 / (number of positions)
+     *    because the window's loss is the mean over its positions.
+     * 4. Backpropagation: the errors are passed back through the model, each
+     *    component storing what it needs.
+     * 5. Gradients: each component calculates its gradients. The first window
+     *    of the batch replaces the previous batch's gradients; the rest are
+     *    averaged in, so the result is the gradient of the whole batch's mean
+     *    loss.
+     *
+     * Then, once the whole batch has been processed, the optimizer updates
+     * every weight once, using the batch's averaged gradients.
+     *
+     * Hyperparameters.mode must already be TRAINING_MODE.
+     *
+     * @param batch - The windows in the batch.
+     * @returns The batch's loss: the average loss per token, measured before the weights were updated.
+     */
+    trainOnBatch(batch) {
+        let totalLoss = 0;
+        let tokenCount = 0;
+        for (let windowIndex = 0; windowIndex < batch.length; windowIndex++) {
+            const window = batch[windowIndex];
+            // 1. Forward pass.
+            const logits = this.model.update(window.inputs);
+            // 2 and 3. The loss and the errors at the logits, for every position.
+            const scale = 1 / window.targets.length;
+            const outputErrors = [];
+            for (let position = 0; position < logits.length; position++) {
+                totalLoss += crossEntropyLoss(logits[position], window.targets[position]);
+                outputErrors.push(crossEntropyErrors(logits[position], window.targets[position], scale));
+            }
+            tokenCount += window.targets.length;
+            // 4. Backpropagation.
+            this.model.backpropagate(outputErrors);
+            // 5. Gradients: replace them for the first window of the batch, average the rest in.
+            const isStartOfBatch = windowIndex === 0;
+            this.model.calculateGradients(!isStartOfBatch);
+        }
+        // One weight update per batch, from the gradients averaged over its windows.
+        this.model.updateWeights(this.optimizer);
+        return totalLoss / tokenCount;
     }
     /**
      * Calculates the loss of the model on the validation set in

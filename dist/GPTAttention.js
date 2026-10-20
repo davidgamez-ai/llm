@@ -436,6 +436,24 @@ class GPTAttention {
         this.valueBiasGradients = runningMean(this.valueBiasGradients, valueBiasGradients, this.gradientCount);
     }
     /**
+     * Updates the query, key and value weights (and biases, when qkvBias is
+     * true) from the gradients calculated by calculateGradients(), using the
+     * shared optimizer. Weight decay is applied to the weights but not to the
+     * biases.
+     *
+     * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+     */
+    updateWeights(optimizer) {
+        optimizer.updateMatrix(this.queryWeights, this.queryWeightGradients, true);
+        optimizer.updateMatrix(this.keyWeights, this.keyWeightGradients, true);
+        optimizer.updateMatrix(this.valueWeights, this.valueWeightGradients, true);
+        if (this.qkvBias) {
+            optimizer.updateVector(this.queryBiases, this.queryBiasGradients, false);
+            optimizer.updateVector(this.keyBiases, this.keyBiasGradients, false);
+            optimizer.updateVector(this.valueBiases, this.valueBiasGradients, false);
+        }
+    }
+    /**
      * Counts the trainable parameters in this attention head: every value in
      * the query, key and value weight matrices, plus their biases. The biases
      * are empty, and so add nothing, when qkvBias is false.

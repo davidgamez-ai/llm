@@ -19,16 +19,31 @@ const writeTempFile = (text: string): string => {
   return filePath;
 };
 
-// About 2,000 tokens of varied text: enough for many windows in both sets.
-const TEXT: string = Array.from({ length: 200 }, (_, i) => `Sentence ${i} is about item ${(i * 7) % 13}.`).join(" ");
+/** Builds varied text from count numbered sentences. */
+const sentences = (count: number): string =>
+  Array.from({ length: count }, (_, i) => `Sentence ${i} is about item ${(i * 7) % 13}.`).join(" ");
+
+/*
+ * About 2,000 tokens of varied text. Only used by the reference test, whose
+ * recorded validation loss depends on it.
+ */
+const REFERENCE_TEXT: string = sentences(200);
+
+/*
+ * About 400 tokens: enough for many windows in both sets. Training now
+ * runs backpropagation and weight updates for every window, so the tests
+ * that call train() use this shorter text to stay quick.
+ */
+const TEXT: string = sentences(40);
 
 /*
  * Builds a tiny model (embeddingSize 8, 2 heads, 1 block) so the tests run
  * quickly, with contextLength 4 and batchSize 3. It starts in
  * GENERATION_MODE so the tests can check the mode is restored. Every call to
- * the model's update() is recorded, with the mode it was called in.
+ * the model's update(), calculateGradients() and updateWeights() is
+ * recorded, with the mode update() was called in.
  */
-const setUp = (numberEpochs: number = 1) => {
+const setUp = (numberEpochs: number = 1, text: string = TEXT) => {
   const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.GENERATION_MODE, 2, 1, 3);
   hyperparameters.numberEpochs = numberEpochs;
   hyperparameters.seed = 42;
@@ -41,9 +56,22 @@ const setUp = (numberEpochs: number = 1) => {
     return update(inputs);
   };
 
+  // The sequence of training calls: "average" or "replace" for calculateGradients(), "update" for updateWeights().
+  const trainingCalls: string[] = [];
+  const calculateGradients = model.calculateGradients.bind(model);
+  model.calculateGradients = (batchAverage: boolean) => {
+    trainingCalls.push(batchAverage ? "average" : "replace");
+    calculateGradients(batchAverage);
+  };
+  const updateWeights = model.updateWeights.bind(model);
+  model.updateWeights = (optimizer) => {
+    trainingCalls.push("update");
+    updateWeights(optimizer);
+  };
+
   const trainer = new Trainer(hyperparameters, model);
-  trainer.load(writeTempFile(TEXT));
-  return { hyperparameters, trainer, calls };
+  trainer.load(writeTempFile(text));
+  return { hyperparameters, model, trainer, calls, trainingCalls };
 };
 
 test("load() splits the text 90/10 by characters before tokenizing", () => {
@@ -97,7 +125,29 @@ test("train() shuffles the training windows differently in each epoch", () => {
   assert.notDeepEqual(firstEpoch, secondEpoch);
 });
 
-test("calculateValidationLoss() is deterministic and matches the loss reported by train()", () => {
+test("for each batch, train() replaces the gradients with the first window, averages in the rest, then updates the weights once", () => {
+  const { trainer, calls, trainingCalls } = setUp();
+
+  trainer.train();
+
+  // With batchSize 3, every batch is: replace, average, average, update.
+  const batchCount = calls.filter((call) => call.mode === Hyperparameters.TRAINING_MODE).length / 3;
+  const expected = Array.from({ length: batchCount }, () => ["replace", "average", "average", "update"]).flat();
+  assert.ok(batchCount > 1);
+  assert.deepEqual(trainingCalls, expected);
+});
+
+test("train() changes the weights, so the validation loss changes from epoch to epoch", () => {
+  const { model, trainer } = setUp(2);
+  const before = Float32Array.from(model.linearOutputLayer.weights.data);
+
+  const losses = trainer.train();
+
+  assert.ok(model.linearOutputLayer.weights.data.some((value, i) => value !== before[i]));
+  assert.notEqual(losses[0].validationLoss, losses[1].validationLoss);
+});
+
+test("calculateValidationLoss() is deterministic and matches the loss reported at the end of training", () => {
   const { trainer } = setUp();
 
   const losses = trainer.train();
@@ -108,7 +158,7 @@ test("calculateValidationLoss() is deterministic and matches the loss reported b
 });
 
 test("calculateValidationLoss() of the untrained model matches the recorded reference", () => {
-  const { trainer } = setUp();
+  const { trainer } = setUp(1, REFERENCE_TEXT);
 
   /*
    * Recorded before the loss calculation was moved into Loss.ts, so this
@@ -116,6 +166,25 @@ test("calculateValidationLoss() of the untrained model matches the recorded refe
    * ln(vocabularySize) = ln(50257), about 10.82, as expected for an untrained model.
    */
   assert.ok(Math.abs(trainer.calculateValidationLoss() - 10.81001060108122) <= 1e-12);
+});
+
+test("training on short, repetitive text drives the loss far below that of an untrained model", () => {
+  /*
+   * The text repeats two sentences, so a model that learns should soon
+   * predict it well: it overfits. A higher learning rate than the default
+   * (0.02 rather than 0.0004) makes this happen in a few epochs. The loss of
+   * an untrained model is about ln(50257) = 10.8.
+   */
+  const { hyperparameters, trainer } = setUp(8, "The cat sat on the mat. The dog sat on the log. ".repeat(6));
+  hyperparameters.learningRate = 0.02;
+
+  const losses = trainer.train();
+
+  const first = losses[0].trainingLoss;
+  const last = losses[losses.length - 1].trainingLoss;
+  assert.ok(last < 3, `final training loss ${last}`);
+  assert.ok(last < first / 3, `training loss fell only from ${first} to ${last}`);
+  assert.ok(losses[losses.length - 1].validationLoss < 3, `final validation loss ${losses[losses.length - 1].validationLoss}`);
 });
 
 test("train() throws a clear error when there is not enough text for one batch", () => {

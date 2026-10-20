@@ -178,6 +178,16 @@ class LinearOutputLayer {
         this.weightGradients = runningMean(this.weightGradients, weightGradients, this.gradientCount);
     }
     /**
+     * Updates the weights from the gradients calculated by
+     * calculateGradients(), using the shared optimizer. Weight decay is
+     * applied, as it is to every weight matrix.
+     *
+     * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+     */
+    updateWeights(optimizer) {
+        optimizer.updateMatrix(this.weights, this.weightGradients, true);
+    }
+    /**
      * Counts the trainable parameters in the layer: every value in the weight
      * matrix. Returns 0 until build() has been called.
      *

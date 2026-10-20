@@ -25,7 +25,7 @@ const DEBUG = {
     LINEAR_OUTPUT_LAYER: false,
 
     /** Switches on log output for the trainer */
-    TRAINER: false,
+    TRAINER: true,
 
     /** Enables verbose log output, including tables of weights, etc. */
     VERBOSE: false

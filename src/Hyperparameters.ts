@@ -121,9 +121,8 @@ class Hyperparameters {
    * the book. Must be greater than 0 and less than 1, so that neither set
    * is empty.
    * @param numberEpochs - The number of times training passes over the whole
-   * training set. Defaults to 1. The book uses 10, but until the weights are
-   * updated every epoch gives the same loss, so further epochs only take
-   * time. Must be a positive whole number.
+   * training set. Defaults to 1, so a test run finishes quickly; the book
+   * uses 10. Must be a positive whole number.
    * @param learningRate - The size of each AdamW weight update. Defaults to
    * 0.0004, the value the book uses in chapter 5 (dnn uses 0.001). Must be a
    * finite number greater than 0.
@@ -165,8 +164,8 @@ class Hyperparameters {
    * @throws RangeError if weightDecay is negative, infinite or NaN.
    */
   constructor(
-    embeddingSize: number = 768,
-    contextLength: number = 12,//GPT-2 uses 1024
+    embeddingSize: number = 768,//GPT-2 uses 768
+    contextLength: number = 1024,//GPT-2 uses 1024
     dropoutRate: number = 0.1,
     mode: number = Hyperparameters.TRAINING_MODE,
     numberAttentionHeads: number = 12,

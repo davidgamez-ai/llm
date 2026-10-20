@@ -155,6 +155,19 @@ class Transformer {
         this.feedForward.calculateGradients(batchAverage);
     }
     /**
+     * Updates the parameters of every trainable stage in the block, using the
+     * shared optimizer. The dropouts and shortcut connections have no
+     * parameters.
+     *
+     * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+     */
+    updateWeights(optimizer) {
+        this.attentionLayerNormalization.updateWeights(optimizer);
+        this.multiHeadAttention.updateWeights(optimizer);
+        this.feedForwardLayerNormalization.updateWeights(optimizer);
+        this.feedForward.updateWeights(optimizer);
+    }
+    /**
      * Adds two matrices of token vectors element by element, as a shortcut
      * connection does: output[token][index] = first[token][index] + second[token][index].
      *

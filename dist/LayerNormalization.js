@@ -165,6 +165,20 @@ class LayerNormalization {
         this.shiftGradients = runningMean(this.shiftGradients, shiftGradients, this.gradientCount);
     }
     /**
+     * Updates scale and shift from the gradients calculated by
+     * calculateGradients(), using the shared optimizer. Weight decay is not
+     * applied: it would pull scale towards 0 rather than towards its natural
+     * value of 1, shrinking every normalized output. As in dnn and GPT-2
+     * practice, only weight matrices and embeddings are decayed. (The book
+     * decays every parameter.)
+     *
+     * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+     */
+    updateWeights(optimizer) {
+        optimizer.updateVector(this.scale, this.scaleGradients, false);
+        optimizer.updateVector(this.shift, this.shiftGradients, false);
+    }
+    /**
      * Counts the trainable parameters: every value in scale and shift.
      *
      * @returns The total number of scale and shift values, i.e. 2 * embeddingSize.

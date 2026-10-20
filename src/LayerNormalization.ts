@@ -1,5 +1,6 @@
 import Hyperparameters from "./Hyperparameters.js";
 import { runningMean } from "./Matrix.js";
+import AdamW from "./AdamW.js";
 
 /**
  * Layer normalization, as in GPT-2 and PyTorch's nn.LayerNorm. Normalizes
@@ -195,6 +196,21 @@ class LayerNormalization {
     this.gradientCount = batchAverage && this.gradientCount > 0 ? this.gradientCount + 1 : 1;
     this.scaleGradients = runningMean(this.scaleGradients, scaleGradients, this.gradientCount);
     this.shiftGradients = runningMean(this.shiftGradients, shiftGradients, this.gradientCount);
+  }
+
+  /**
+   * Updates scale and shift from the gradients calculated by
+   * calculateGradients(), using the shared optimizer. Weight decay is not
+   * applied: it would pull scale towards 0 rather than towards its natural
+   * value of 1, shrinking every normalized output. As in dnn and GPT-2
+   * practice, only weight matrices and embeddings are decayed. (The book
+   * decays every parameter.)
+   *
+   * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+   */
+  updateWeights(optimizer: AdamW): void {
+    optimizer.updateVector(this.scale, this.scaleGradients, false);
+    optimizer.updateVector(this.shift, this.shiftGradients, false);
   }
 
   /**

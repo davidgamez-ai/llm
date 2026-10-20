@@ -115,9 +115,8 @@ class Hyperparameters {
      * the book. Must be greater than 0 and less than 1, so that neither set
      * is empty.
      * @param numberEpochs - The number of times training passes over the whole
-     * training set. Defaults to 1. The book uses 10, but until the weights are
-     * updated every epoch gives the same loss, so further epochs only take
-     * time. Must be a positive whole number.
+     * training set. Defaults to 1, so a test run finishes quickly; the book
+     * uses 10. Must be a positive whole number.
      * @param learningRate - The size of each AdamW weight update. Defaults to
      * 0.0004, the value the book uses in chapter 5 (dnn uses 0.001). Must be a
      * finite number greater than 0.
@@ -158,7 +157,8 @@ class Hyperparameters {
      * @throws RangeError if beta1 or beta2 is not at least 0 and less than 1.
      * @throws RangeError if weightDecay is negative, infinite or NaN.
      */
-    constructor(embeddingSize = 768, contextLength = 12, //GPT-2 uses 1024
+    constructor(embeddingSize = 768, //GPT-2 uses 768
+    contextLength = 1024, //GPT-2 uses 1024
     dropoutRate = 0.1, mode = Hyperparameters.TRAINING_MODE, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = false, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, linearLayerStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, trainingRatio = 0.9, numberEpochs = 1, learningRate = 0.0004, beta1 = 0.9, beta2 = 0.999, optimizerEpsilon = 1e-8, weightDecay = 0.1, seed) {
         Hyperparameters.validatePositiveInteger("contextLength", contextLength);
         Hyperparameters.validateDropoutRate(dropoutRate);

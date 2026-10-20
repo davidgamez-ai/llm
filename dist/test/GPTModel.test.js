@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import Hyperparameters from "../Hyperparameters.js";
 import GPTModel from "../GPTModel.js";
 import { crossEntropyLoss, crossEntropyErrors } from "../Loss.js";
+import AdamW from "../AdamW.js";
 import { checkGradients } from "./GradientCheck.js";
 /*
  * Reference logits: a safety net for refactoring.
@@ -225,4 +226,116 @@ test("backpropagate() rejects errors for a different number of tokens", () => {
     const { model } = buildTrainingModel();
     const logits = model.update(TOKENS);
     assert.throws(() => model.backpropagate(logits.slice(1)), RangeError);
+});
+/**
+ * Lists every parameter array in the model, with whether it should be
+ * weight decayed: weight matrices and embeddings are; biases and layer
+ * normalization scale and shift are not. Written out independently of the
+ * model's own updateWeights() methods, so the tests check them.
+ */
+const allParameters = (model) => {
+    const list = [];
+    const add = (name, values, gradients, decayed) => {
+        list.push({ name, values, gradients, decayed });
+    };
+    const embedding = model.embedding;
+    add("token embedding", embedding.textEmbeddingMatrix.data, () => embedding.textEmbeddingGradients.data, true);
+    add("position embedding", embedding.positionEmbeddingMatrix.data, () => embedding.positionEmbeddingGradients.data, true);
+    model.transformers.forEach((block, b) => {
+        for (const [label, layerNormalization] of [["attention", block.attentionLayerNormalization], ["feed forward", block.feedForwardLayerNormalization]]) {
+            add(`block ${b} ${label} layer normalization scale`, layerNormalization.scale, () => layerNormalization.scaleGradients, false);
+            add(`block ${b} ${label} layer normalization shift`, layerNormalization.shift, () => layerNormalization.shiftGradients, false);
+        }
+        const attention = block.multiHeadAttention;
+        attention.attentionHeads.forEach((head, h) => {
+            add(`block ${b} head ${h} query weights`, head.queryWeights.data, () => head.queryWeightGradients.data, true);
+            add(`block ${b} head ${h} key weights`, head.keyWeights.data, () => head.keyWeightGradients.data, true);
+            add(`block ${b} head ${h} value weights`, head.valueWeights.data, () => head.valueWeightGradients.data, true);
+            // The query, key and value biases are empty: qkvBias is false by default, as in the book.
+        });
+        add(`block ${b} attention output projection weights`, attention.outputProjectionWeights.data, () => attention.outputProjectionWeightGradients.data, true);
+        add(`block ${b} attention output projection biases`, attention.outputProjectionBiases, () => attention.outputProjectionBiasGradients, false);
+        const feedForward = block.feedForward;
+        add(`block ${b} feed forward first layer weights`, feedForward.firstLayerWeights.data, () => feedForward.firstLayerWeightGradients.data, true);
+        add(`block ${b} feed forward first layer biases`, feedForward.firstLayerBiases, () => feedForward.firstLayerBiasGradients, false);
+        add(`block ${b} feed forward second layer weights`, feedForward.secondLayerWeights.data, () => feedForward.secondLayerWeightGradients.data, true);
+        add(`block ${b} feed forward second layer biases`, feedForward.secondLayerBiases, () => feedForward.secondLayerBiasGradients, false);
+    });
+    add("final layer normalization scale", model.finalLayerNormalization.scale, () => model.finalLayerNormalization.scaleGradients, false);
+    add("final layer normalization shift", model.finalLayerNormalization.shift, () => model.finalLayerNormalization.shiftGradients, false);
+    add("output layer weights", model.linearOutputLayer.weights.data, () => model.linearOutputLayer.weightGradients.data, true);
+    return list;
+};
+/**
+ * One training step on TOKENS: forward pass and backpropagation in training
+ * mode, gradients, then a weight update.
+ */
+const trainingStep = (model, optimizer) => {
+    const logits = model.update(TOKENS);
+    model.backpropagate(logits.map((row, t) => crossEntropyErrors(row, TARGETS[t], 1 / TARGETS.length)));
+    model.calculateGradients(false);
+    model.updateWeights(optimizer);
+};
+/** The loss on TOKENS in validation mode, so dropout cannot affect it. */
+const validationLoss = (hyperparameters, model) => {
+    hyperparameters.mode = Hyperparameters.VALIDATION_MODE;
+    const loss = meanLoss(model.update(TOKENS));
+    hyperparameters.mode = Hyperparameters.TRAINING_MODE;
+    return loss;
+};
+test("the parameter list used by these tests covers every parameter the model counts", () => {
+    const { model } = buildTrainingModel();
+    const listed = allParameters(model).reduce((sum, parameter) => sum + parameter.values.length, 0);
+    assert.equal(listed, model.getParameterCount());
+});
+test("each training step lowers the loss on the window it was trained on", () => {
+    const { hyperparameters, model } = buildTrainingModel();
+    const optimizer = new AdamW(hyperparameters);
+    const losses = [validationLoss(hyperparameters, model)];
+    for (let step = 0; step < 5; step++) {
+        trainingStep(model, optimizer);
+        losses.push(validationLoss(hyperparameters, model));
+    }
+    for (let step = 1; step < losses.length; step++) {
+        assert.ok(losses[step] < losses[step - 1], `losses: ${losses}`);
+    }
+    assert.equal(optimizer.stepCount, 5);
+});
+test("updateWeights() changes every parameter array in the model", () => {
+    const { hyperparameters, model } = buildTrainingModel();
+    const parameters = allParameters(model);
+    const before = parameters.map((parameter) => Float32Array.from(parameter.values));
+    trainingStep(model, new AdamW(hyperparameters));
+    parameters.forEach((parameter, i) => {
+        assert.ok(parameter.values.some((value, j) => value !== before[i][j]), `${parameter.name} did not change`);
+    });
+});
+test("weight decay is applied to weight matrices and embeddings, but not to biases or layer normalization", () => {
+    const { hyperparameters, model } = buildTrainingModel();
+    const parameters = allParameters(model);
+    // Calculate gradients, then set them all to 0, so the only change the update can make is weight decay.
+    const logits = model.update(TOKENS);
+    model.backpropagate(logits.map((row, t) => crossEntropyErrors(row, TARGETS[t], 1 / TARGETS.length)));
+    model.calculateGradients(false);
+    parameters.forEach((parameter) => parameter.gradients().fill(0));
+    // Biases and shifts start at 0, which decay would not change, so give every parameter a non-zero value.
+    parameters.forEach((parameter) => {
+        if (!parameter.decayed)
+            parameter.values.fill(0.5);
+    });
+    const before = parameters.map((parameter) => Float32Array.from(parameter.values));
+    model.updateWeights(new AdamW(hyperparameters));
+    // Decay multiplies each value by 1 - learningRate * weightDecay; with no gradient, AdamW's own step is exactly 0.
+    const decay = hyperparameters.learningRate * hyperparameters.weightDecay;
+    parameters.forEach((parameter, i) => {
+        parameter.values.forEach((value, j) => {
+            const original = before[i][j];
+            const expected = parameter.decayed ? Math.fround(original - decay * original) : original;
+            assert.equal(value, expected, `${parameter.name}[${j}]`);
+        });
+    });
+});
+test("updateWeights() before calculateGradients() explains that there are no gradients", () => {
+    const { hyperparameters, model } = buildTrainingModel();
+    assert.throws(() => model.updateWeights(new AdamW(hyperparameters)), /has calculateGradients\(\) been called/);
 });

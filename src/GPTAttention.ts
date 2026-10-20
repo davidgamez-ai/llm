@@ -3,6 +3,7 @@ import { randomNormalMatrix } from "./WeightInitialization.js";
 import Matrix, { vectorTimesMatrix, matrixTimesVector, addOuterProduct, addToVector, runningMean } from "./Matrix.js";
 import Dropout from "./Dropout.js";
 import { softmax } from "./Loss.js";
+import AdamW from "./AdamW.js";
 import DEBUG from "./Debug.js"
 
 /**
@@ -493,6 +494,25 @@ class GPTAttention {
     this.queryBiasGradients = runningMean(this.queryBiasGradients, queryBiasGradients, this.gradientCount);
     this.keyBiasGradients = runningMean(this.keyBiasGradients, keyBiasGradients, this.gradientCount);
     this.valueBiasGradients = runningMean(this.valueBiasGradients, valueBiasGradients, this.gradientCount);
+  }
+
+  /**
+   * Updates the query, key and value weights (and biases, when qkvBias is
+   * true) from the gradients calculated by calculateGradients(), using the
+   * shared optimizer. Weight decay is applied to the weights but not to the
+   * biases.
+   *
+   * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+   */
+  updateWeights(optimizer: AdamW): void {
+    optimizer.updateMatrix(this.queryWeights, this.queryWeightGradients, true);
+    optimizer.updateMatrix(this.keyWeights, this.keyWeightGradients, true);
+    optimizer.updateMatrix(this.valueWeights, this.valueWeightGradients, true);
+    if (this.qkvBias) {
+      optimizer.updateVector(this.queryBiases, this.queryBiasGradients, false);
+      optimizer.updateVector(this.keyBiases, this.keyBiasGradients, false);
+      optimizer.updateVector(this.valueBiases, this.valueBiasGradients, false);
+    }
   }
 
   /**

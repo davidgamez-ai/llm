@@ -2,6 +2,7 @@ import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
 import { randomNormalMatrix } from "./WeightInitialization.js";
 import Matrix, { addToVector, runningMean } from "./Matrix.js";
+import AdamW from "./AdamW.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -282,6 +283,23 @@ class Embedding {
     this.gradientCount = batchAverage && this.gradientCount > 0 ? this.gradientCount + 1 : 1;
     this.textEmbeddingGradients = runningMean(this.textEmbeddingGradients, textEmbeddingGradients, this.gradientCount);
     this.positionEmbeddingGradients = runningMean(this.positionEmbeddingGradients, positionEmbeddingGradients, this.gradientCount);
+  }
+
+  /**
+   * Updates both embedding matrices from the gradients calculated by
+   * calculateGradients(), using the shared optimizer, with weight decay (as
+   * GPT-2 implementations such as nanoGPT do for embeddings).
+   *
+   * Every row is updated, not only the rows of tokens in the batch. A row
+   * whose gradient is 0 this batch still moves: AdamW's running average
+   * keeps it moving in the direction it was recently pushed, and weight
+   * decay shrinks it a little.
+   *
+   * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+   */
+  updateWeights(optimizer: AdamW): void {
+    optimizer.updateMatrix(this._textEmbeddingMatrix, this.textEmbeddingGradients, true);
+    optimizer.updateMatrix(this._positionEmbeddingMatrix, this.positionEmbeddingGradients, true);
   }
 
   /**

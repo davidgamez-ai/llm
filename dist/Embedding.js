@@ -239,6 +239,22 @@ class Embedding {
         this.positionEmbeddingGradients = runningMean(this.positionEmbeddingGradients, positionEmbeddingGradients, this.gradientCount);
     }
     /**
+     * Updates both embedding matrices from the gradients calculated by
+     * calculateGradients(), using the shared optimizer, with weight decay (as
+     * GPT-2 implementations such as nanoGPT do for embeddings).
+     *
+     * Every row is updated, not only the rows of tokens in the batch. A row
+     * whose gradient is 0 this batch still moves: AdamW's running average
+     * keeps it moving in the direction it was recently pushed, and weight
+     * decay shrinks it a little.
+     *
+     * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+     */
+    updateWeights(optimizer) {
+        optimizer.updateMatrix(this._textEmbeddingMatrix, this.textEmbeddingGradients, true);
+        optimizer.updateMatrix(this._positionEmbeddingMatrix, this.positionEmbeddingGradients, true);
+    }
+    /**
      * Counts the trainable parameters in the embedding: every value in the
      * token embedding matrix and the position embedding matrix. Returns 0
      * until build() has been called.

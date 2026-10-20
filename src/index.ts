@@ -9,7 +9,7 @@ import Trainer from "./Trainer.js";
  * (dist/index.js) rather than the current working directory, so the program
  * finds the data however it is launched.
  */
-// const filePath = path.join(import.meta.dirname, "..", "data", "the-verdict.txt");
+const filePath = path.join(import.meta.dirname, "..", "data", "the-verdict.txt");
 
 // //Create hyperparameters in generation mode with a random seed. Trainer.train() switches to training mode while it runs.
 const hyperparameters = new Hyperparameters();
@@ -19,21 +19,25 @@ hyperparameters.seed = 123;
 //Build a single model, shared by the trainer and the generator so that generation uses the trained weights.
 const model:GPTModel = new GPTModel(hyperparameters);
 
-// //Trainer
-// const trainer:Trainer = new Trainer(hyperparameters, model);
-// trainer.load(filePath);
-// trainer.train();
-
-
-//Generator
+//Build generator
 const generator: Generator = new Generator(hyperparameters, model);
 
-//Starting text
-const text:string = "First test of GPT model";
+//Test text
+const text:string = "It was not till three years later";
 
+//Output completion before model is trained.
 //Call generator to build text
-const generatedText:string = generator.generate(text);
+let generatedText:string = generator.generate(text);
+console.log(`Generated text before training: "${generatedText}".`);
 
-//Output result
-console.log(`Final generated text: "${generatedText}".`);
+// Train model
+const trainer:Trainer = new Trainer(hyperparameters, model);
+trainer.load(filePath);
+trainer.train();
+
+//Output completion after model is trained.
+//Call generator to build text
+generatedText = generator.generate(text);
+console.log(`Generated text after training: "${generatedText}".`);
+
 

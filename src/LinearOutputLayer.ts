@@ -1,6 +1,7 @@
 import Hyperparameters from "./Hyperparameters.js";
 import { randomNormalMatrix } from "./WeightInitialization.js";
 import Matrix, { matrixTimesVector, vectorTimesMatrix, addOuterProduct, runningMean } from "./Matrix.js";
+import AdamW from "./AdamW.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -201,6 +202,17 @@ class LinearOutputLayer {
 
     this.gradientCount = batchAverage && this.gradientCount > 0 ? this.gradientCount + 1 : 1;
     this.weightGradients = runningMean(this.weightGradients, weightGradients, this.gradientCount);
+  }
+
+  /**
+   * Updates the weights from the gradients calculated by
+   * calculateGradients(), using the shared optimizer. Weight decay is
+   * applied, as it is to every weight matrix.
+   *
+   * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+   */
+  updateWeights(optimizer: AdamW): void {
+    optimizer.updateMatrix(this.weights, this.weightGradients, true);
   }
 
   /**

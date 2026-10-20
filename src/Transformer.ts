@@ -3,6 +3,7 @@ import MultiHeadAttention from "./MultiHeadAttention.js";
 import FeedForward from "./FeedForward.js";
 import LayerNormalization from "./LayerNormalization.js";
 import Dropout from "./Dropout.js";
+import AdamW from "./AdamW.js";
 import DEBUG from "./Debug.js";
 
 /**
@@ -175,6 +176,20 @@ class Transformer {
     this.multiHeadAttention.calculateGradients(batchAverage);
     this.feedForwardLayerNormalization.calculateGradients(batchAverage);
     this.feedForward.calculateGradients(batchAverage);
+  }
+
+  /**
+   * Updates the parameters of every trainable stage in the block, using the
+   * shared optimizer. The dropouts and shortcut connections have no
+   * parameters.
+   *
+   * @param optimizer - The model's AdamW optimizer. Its step() must already have been called for this batch.
+   */
+  updateWeights(optimizer: AdamW): void {
+    this.attentionLayerNormalization.updateWeights(optimizer);
+    this.multiHeadAttention.updateWeights(optimizer);
+    this.feedForwardLayerNormalization.updateWeights(optimizer);
+    this.feedForward.updateWeights(optimizer);
   }
 
   /**
