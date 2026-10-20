@@ -106,6 +106,60 @@ class GPTModel {
   }
 
   /**
+   * Backpropagation through the whole model: passes the errors at the
+   * logits back through every component, in the reverse order of update():
+   *
+   *     linear output layer → final layer normalization → transformer blocks
+   *     (last to first) → embedding dropout → embedding
+   *
+   * Each component turns the errors at its output into the errors at its
+   * input, and stores what it needs to calculate its gradients. The model
+   * takes the errors rather than the targets, so it contains no loss
+   * calculation: the trainer works out the errors from the loss (with
+   * crossEntropyErrors) and hands them in, as dnn's trainer does.
+   *
+   * Must follow an update() in training or validation mode, which return
+   * logits for every token; in generation mode only the last token's logits
+   * are calculated, so there is nothing to pass errors back through for the
+   * other tokens.
+   *
+   * @param outputErrors - The errors at the logits: one row per token, each vocabularySize values wide.
+   * @throws RangeError if outputErrors does not have one row per token given to the most recent update().
+   */
+  backpropagate(outputErrors: number[][]): void {
+    let errors: number[][] = this.linearOutputLayer.backpropagate(outputErrors);
+    errors = this.finalLayerNormalization.backpropagate(errors);
+
+    // The blocks were applied first to last, so the errors pass back through them last to first.
+    for (let block = this.transformers.length - 1; block >= 0; block--) {
+      errors = this.transformers[block].backpropagate(errors);
+    }
+
+    errors = this.embeddingDropout.backpropagate(errors);
+    this.embedding.backpropagate(errors);
+
+    if (DEBUG.GPT_MODEL) {
+      console.log("GPTModel| Backpropagation complete.");
+    }
+  }
+
+  /**
+   * Calculates the gradients of every trainable parameter in the model, by
+   * asking each component to calculate its own from the values it stored
+   * during update() and backpropagate(). The dropouts have no parameters.
+   *
+   * @param batchAverage - False for the first window of a batch, which replaces the stored gradients; true for later windows, which are averaged into them.
+   */
+  calculateGradients(batchAverage: boolean): void {
+    this.embedding.calculateGradients(batchAverage);
+    for (const transformer of this.transformers) {
+      transformer.calculateGradients(batchAverage);
+    }
+    this.finalLayerNormalization.calculateGradients(batchAverage);
+    this.linearOutputLayer.calculateGradients(batchAverage);
+  }
+
+  /**
    * Counts the trainable parameters in the whole model: the embedding, every
    * transformer block, the final layer normalization and the linear output
    * layer. Dropout has no parameters.

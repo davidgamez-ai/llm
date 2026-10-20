@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import Hyperparameters from "../Hyperparameters.js";
 import GPTModel from "../GPTModel.js";
+import { crossEntropyLoss, crossEntropyErrors } from "../Loss.js";
+import { checkGradients } from "./GradientCheck.js";
 /*
  * Reference logits: a safety net for refactoring.
  *
@@ -101,4 +103,126 @@ test("validation mode logits match the recorded reference", () => {
 });
 test("generation mode returns only the last row, matching the recorded reference", () => {
     assertMatches(run(Hyperparameters.GENERATION_MODE), REFERENCE_GENERATION);
+});
+/*
+ * Backpropagation through the whole model, checked against numerical
+ * gradients with the real loss: the cross entropy averaged over the
+ * window's positions, exactly as the trainer will use it.
+ */
+/** The token that follows each of TOKENS: TOKENS shifted one place to the left, plus one more token. */
+const TARGETS = [3290, 318, 3290, 13];
+/**
+ * Builds a tiny two-block model in training mode. The linear layers and
+ * output layer use a larger standard deviation (0.3) than GPT-2's 0.02, so
+ * the attention weights and logits are far from uniform and every stage
+ * has a real effect.
+ *
+ * @param dropoutRate - The dropout rate. 0 makes the forward pass deterministic.
+ */
+const buildTrainingModel = (dropoutRate = 0) => {
+    const hyperparameters = new Hyperparameters(8, 4, dropoutRate, Hyperparameters.TRAINING_MODE, 2, 2);
+    hyperparameters.linearLayerStandardDeviation = 0.3;
+    hyperparameters.outputLayerStandardDeviation = 0.3;
+    hyperparameters.seed = 71;
+    return { hyperparameters, model: new GPTModel(hyperparameters) };
+};
+/**
+ * The loss the trainer uses for one window: the cross entropy of each
+ * position's logits, averaged over the positions.
+ */
+const meanLoss = (logits) => logits.reduce((sum, row, t) => sum + crossEntropyLoss(row, TARGETS[t]), 0) / TARGETS.length;
+/**
+ * Runs the gradient check on the whole model with the real loss, for a
+ * sample of parameters from every kind of component.
+ *
+ * checkGradients works with any output, using the made-up loss
+ * sum(output * R). Here the output is a single value, the mean loss, so the
+ * made-up loss is R times the mean loss, and the errors at the logits are
+ * the mean loss's errors multiplied by R: crossEntropyErrors with a scale of
+ * R / (number of positions).
+ *
+ * @param model - The model to check.
+ * @param beforeForward - Called before every forward pass, e.g. to reset the random seed so dropout draws the same masks each time.
+ */
+const checkModel = (model, beforeForward = () => { }) => {
+    let logits = [];
+    const [first, last] = [model.transformers[0], model.transformers[model.transformers.length - 1]];
+    // Rows of a matrix, as views, so nudging a row nudges the matrix.
+    const row = (name, matrix, gradients, r) => ({ name: `${name} row ${r}`, values: matrix().getRow(r), gradients: () => gradients().getRow(r) });
+    const parameters = [
+        // Token embedding rows of tokens in the window; every other row's gradient is 0.
+        row("token embedding", () => model.embedding.textEmbeddingMatrix, () => model.embedding.textEmbeddingGradients, 464),
+        row("token embedding", () => model.embedding.textEmbeddingMatrix, () => model.embedding.textEmbeddingGradients, 3290),
+        { name: "position embedding", values: model.embedding.positionEmbeddingMatrix.data, gradients: () => model.embedding.positionEmbeddingGradients.data },
+        { name: "block 0 head 0 queryWeights", values: first.multiHeadAttention.attentionHeads[0].queryWeights.data, gradients: () => first.multiHeadAttention.attentionHeads[0].queryWeightGradients.data },
+        { name: "block 0 attention layer normalization scale", values: first.attentionLayerNormalization.scale, gradients: () => first.attentionLayerNormalization.scaleGradients },
+        { name: "block 1 head 1 valueWeights", values: last.multiHeadAttention.attentionHeads[1].valueWeights.data, gradients: () => last.multiHeadAttention.attentionHeads[1].valueWeightGradients.data },
+        { name: "block 1 feed forward secondLayerWeights", values: last.feedForward.secondLayerWeights.data, gradients: () => last.feedForward.secondLayerWeightGradients.data },
+        { name: "block 1 feed forward firstLayerBiases", values: last.feedForward.firstLayerBiases, gradients: () => last.feedForward.firstLayerBiasGradients },
+        { name: "final layer normalization shift", values: model.finalLayerNormalization.shift, gradients: () => model.finalLayerNormalization.shiftGradients },
+        // Output layer rows of a target token (large gradient) and a token that is never the target (small gradient).
+        row("output layer", () => model.linearOutputLayer.weights, () => model.linearOutputLayer.weightGradients, 318),
+        row("output layer", () => model.linearOutputLayer.weights, () => model.linearOutputLayer.weightGradients, 1000),
+    ];
+    checkGradients({
+        forward: () => {
+            beforeForward();
+            logits = model.update(TOKENS);
+            return [[meanLoss(logits)]];
+        },
+        backward: (outputErrors) => {
+            const scale = outputErrors[0][0] / TARGETS.length;
+            model.backpropagate(logits.map((row, t) => crossEntropyErrors(row, TARGETS[t], scale)));
+            model.calculateGradients(false);
+        },
+        parameters,
+        /*
+         * The embeddings are tiny (standard deviation 0.02 and 0.01), and the
+         * first layer normalization divides them by their spread, magnifying
+         * every change about fifty times. The default step of 1e-2 is half the
+         * size of the values themselves, which is far too big for the
+         * numerical gradient to be accurate, so a much smaller step is used.
+         * The values are stored as 32-bit floats, which still resolve a step of
+         * 1e-4 to about 1 part in 10,000.
+         */
+        step: 1e-4,
+        /*
+         * The gradients of a mean loss are small (some around 1e-6), so the
+         * default absolute tolerance of 1e-5 would let almost anything pass.
+         * The loss is calculated in 64-bit, so a far smaller one is safe.
+         */
+        absoluteTolerance: 1e-9,
+    });
+};
+test("backpropagation through the whole model gives the same gradients as the numerical gradients of the real loss", () => {
+    checkModel(buildTrainingModel().model);
+});
+test("backpropagation through the whole model with dropout matches the numerical gradients", () => {
+    const { hyperparameters, model } = buildTrainingModel(0.2);
+    // Resetting the seed before every forward pass makes every dropout draw the same mask each time.
+    checkModel(model, () => { hyperparameters.seed = 72; });
+});
+test("calculateGradients() calculates the gradients of every component", () => {
+    const { model } = buildTrainingModel();
+    const logits = model.update(TOKENS);
+    model.backpropagate(logits.map((row, t) => crossEntropyErrors(row, TARGETS[t], 1 / TARGETS.length)));
+    model.calculateGradients(false);
+    const counts = [
+        model.embedding.gradientCount,
+        ...model.transformers.flatMap((block) => [
+            block.attentionLayerNormalization.gradientCount,
+            block.multiHeadAttention.gradientCount,
+            ...block.multiHeadAttention.attentionHeads.map((head) => head.gradientCount),
+            block.feedForwardLayerNormalization.gradientCount,
+            block.feedForward.gradientCount,
+        ]),
+        model.finalLayerNormalization.gradientCount,
+        model.linearOutputLayer.gradientCount,
+    ];
+    assert.ok(counts.every((count) => count === 1), `gradient counts: ${counts}`);
+});
+test("backpropagate() rejects errors for a different number of tokens", () => {
+    const { model } = buildTrainingModel();
+    const logits = model.update(TOKENS);
+    assert.throws(() => model.backpropagate(logits.slice(1)), RangeError);
 });

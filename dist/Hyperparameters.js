@@ -47,6 +47,11 @@ class Hyperparameters {
     _outputLength;
     _trainingRatio;
     _numberEpochs;
+    _learningRate;
+    _beta1;
+    _beta2;
+    _optimizerEpsilon;
+    _weightDecay;
     _seed;
     /**
      * The random number stream shared by every component built from this
@@ -113,6 +118,22 @@ class Hyperparameters {
      * training set. Defaults to 1. The book uses 10, but until the weights are
      * updated every epoch gives the same loss, so further epochs only take
      * time. Must be a positive whole number.
+     * @param learningRate - The size of each AdamW weight update. Defaults to
+     * 0.0004, the value the book uses in chapter 5 (dnn uses 0.001). Must be a
+     * finite number greater than 0.
+     * @param beta1 - How much of the previous running average of the gradients
+     * AdamW keeps at each step (its momentum). Defaults to 0.9. Must be at
+     * least 0 and less than 1.
+     * @param beta2 - How much of the previous running average of the squared
+     * gradients AdamW keeps at each step. Defaults to 0.999. Must be at least 0
+     * and less than 1.
+     * @param optimizerEpsilon - A small number AdamW adds before dividing, so
+     * it never divides by zero. Defaults to 1e-8. Not to be confused with
+     * LayerNormalization.epsilon. Must be a finite number greater than 0.
+     * @param weightDecay - How strongly AdamW pulls the weights towards 0 at
+     * each step, which discourages large weights and so reduces overfitting.
+     * Defaults to 0.1, the book's value (dnn uses 0.01). Must be a finite
+     * number greater than or equal to 0.
      * @param seed - Optional PRNG seed for the random number stream returned
      * by random(), which every component uses for weight initialization,
      * dropout and decoding. When provided, the same seed always produces the
@@ -133,9 +154,12 @@ class Hyperparameters {
      * @throws RangeError if outputLength is not a positive whole number.
      * @throws RangeError if trainingRatio is not greater than 0 and less than 1.
      * @throws RangeError if numberEpochs is not a positive whole number.
+     * @throws RangeError if learningRate or optimizerEpsilon is not a finite number greater than 0.
+     * @throws RangeError if beta1 or beta2 is not at least 0 and less than 1.
+     * @throws RangeError if weightDecay is negative, infinite or NaN.
      */
     constructor(embeddingSize = 768, contextLength = 12, //GPT-2 uses 1024
-    dropoutRate = 0.1, mode = Hyperparameters.TRAINING_MODE, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = false, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, linearLayerStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, trainingRatio = 0.9, numberEpochs = 1, seed) {
+    dropoutRate = 0.1, mode = Hyperparameters.TRAINING_MODE, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = false, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, linearLayerStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, trainingRatio = 0.9, numberEpochs = 1, learningRate = 0.0004, beta1 = 0.9, beta2 = 0.999, optimizerEpsilon = 1e-8, weightDecay = 0.1, seed) {
         Hyperparameters.validatePositiveInteger("contextLength", contextLength);
         Hyperparameters.validateDropoutRate(dropoutRate);
         Hyperparameters.validateMode(mode);
@@ -150,6 +174,11 @@ class Hyperparameters {
         Hyperparameters.validatePositiveInteger("outputLength", outputLength);
         Hyperparameters.validateTrainingRatio(trainingRatio);
         Hyperparameters.validatePositiveInteger("numberEpochs", numberEpochs);
+        Hyperparameters.validatePositiveNumber("learningRate", learningRate);
+        Hyperparameters.validateBeta("beta1", beta1);
+        Hyperparameters.validateBeta("beta2", beta2);
+        Hyperparameters.validatePositiveNumber("optimizerEpsilon", optimizerEpsilon);
+        Hyperparameters.validateWeightDecay(weightDecay);
         this._embeddingSize = embeddingSize;
         this._contextLength = contextLength;
         this._vocabularySize = new BPETokenizer().vocabularySize;
@@ -168,6 +197,11 @@ class Hyperparameters {
         this._outputLength = outputLength;
         this._trainingRatio = trainingRatio;
         this._numberEpochs = numberEpochs;
+        this._learningRate = learningRate;
+        this._beta1 = beta1;
+        this._beta2 = beta2;
+        this._optimizerEpsilon = optimizerEpsilon;
+        this._weightDecay = weightDecay;
         this._seed = seed;
         this._random = Hyperparameters.createRandom(seed);
     }
@@ -273,6 +307,45 @@ class Hyperparameters {
         // Number.isFinite rejects NaN and Infinity; a negative standard deviation is meaningless.
         if (!(Number.isFinite(standardDeviation) && standardDeviation >= 0)) {
             throw new RangeError(`Hyperparameters| ${name} must be a finite number >= 0; got ${standardDeviation}`);
+        }
+    }
+    /**
+     * Checks that a value is a finite number greater than 0.
+     *
+     * @param name - The name of the hyperparameter, used in the error message.
+     * @param value - The value to check.
+     * @throws RangeError if value is 0 or less, infinite or NaN.
+     */
+    static validatePositiveNumber(name, value) {
+        // Number.isFinite rejects NaN and Infinity.
+        if (!(Number.isFinite(value) && value > 0)) {
+            throw new RangeError(`Hyperparameters| ${name} must be a finite number > 0; got ${value}`);
+        }
+    }
+    /**
+     * Checks that an AdamW running-average rate (beta1 or beta2) is at least 0
+     * and less than 1. A value of 1 would never let the average change, and
+     * AdamW's bias correction would divide by zero.
+     *
+     * @param name - The name of the hyperparameter, used in the error message.
+     * @param value - The value to check.
+     * @throws RangeError if value is less than 0, 1 or more, or NaN.
+     */
+    static validateBeta(name, value) {
+        // Written as a negated range check so that NaN, which fails every comparison, is rejected.
+        if (!(value >= 0 && value < 1)) {
+            throw new RangeError(`Hyperparameters| ${name} must be at least 0 and less than 1; got ${value}`);
+        }
+    }
+    /**
+     * Checks that a weight decay is a finite number greater than or equal to 0.
+     *
+     * @param weightDecay - The weight decay to check.
+     * @throws RangeError if weightDecay is negative, infinite or NaN.
+     */
+    static validateWeightDecay(weightDecay) {
+        if (!(Number.isFinite(weightDecay) && weightDecay >= 0)) {
+            throw new RangeError(`Hyperparameters| weightDecay must be a finite number >= 0; got ${weightDecay}`);
         }
     }
     /** The size of each token embedding vector. */
@@ -469,6 +542,51 @@ class Hyperparameters {
     set numberEpochs(numberEpochs) {
         Hyperparameters.validatePositiveInteger("numberEpochs", numberEpochs);
         this._numberEpochs = numberEpochs;
+    }
+    /** The size of each AdamW weight update. AdamW reads it on every update, so changing it takes effect at the next batch. */
+    get learningRate() {
+        return this._learningRate;
+    }
+    /** @throws RangeError if learningRate is not a finite number greater than 0. */
+    set learningRate(learningRate) {
+        Hyperparameters.validatePositiveNumber("learningRate", learningRate);
+        this._learningRate = learningRate;
+    }
+    /** How much of the previous running average of the gradients AdamW keeps at each step (its momentum). */
+    get beta1() {
+        return this._beta1;
+    }
+    /** @throws RangeError if beta1 is not at least 0 and less than 1. */
+    set beta1(beta1) {
+        Hyperparameters.validateBeta("beta1", beta1);
+        this._beta1 = beta1;
+    }
+    /** How much of the previous running average of the squared gradients AdamW keeps at each step. */
+    get beta2() {
+        return this._beta2;
+    }
+    /** @throws RangeError if beta2 is not at least 0 and less than 1. */
+    set beta2(beta2) {
+        Hyperparameters.validateBeta("beta2", beta2);
+        this._beta2 = beta2;
+    }
+    /** A small number AdamW adds before dividing, so it never divides by zero. Not LayerNormalization.epsilon. */
+    get optimizerEpsilon() {
+        return this._optimizerEpsilon;
+    }
+    /** @throws RangeError if optimizerEpsilon is not a finite number greater than 0. */
+    set optimizerEpsilon(optimizerEpsilon) {
+        Hyperparameters.validatePositiveNumber("optimizerEpsilon", optimizerEpsilon);
+        this._optimizerEpsilon = optimizerEpsilon;
+    }
+    /** How strongly AdamW pulls the weights towards 0 at each step. 0 turns weight decay off. */
+    get weightDecay() {
+        return this._weightDecay;
+    }
+    /** @throws RangeError if weightDecay is negative, infinite or NaN. */
+    set weightDecay(weightDecay) {
+        Hyperparameters.validateWeightDecay(weightDecay);
+        this._weightDecay = weightDecay;
     }
     /**
      * Optional PRNG seed for the random number stream returned by random().

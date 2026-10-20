@@ -293,6 +293,68 @@ test("weight initialization standard deviation setters accept 0 and positive fin
   }
 });
 
+test("the optimizer hyperparameters have the book's defaults", () => {
+  const hyperparameters = new Hyperparameters();
+
+  assert.equal(hyperparameters.learningRate, 0.0004);
+  assert.equal(hyperparameters.beta1, 0.9);
+  assert.equal(hyperparameters.beta2, 0.999);
+  assert.equal(hyperparameters.optimizerEpsilon, 1e-8);
+  assert.equal(hyperparameters.weightDecay, 0.1);
+});
+
+test("the optimizer hyperparameter setters store valid values", () => {
+  const hyperparameters = new Hyperparameters();
+
+  hyperparameters.learningRate = 0.001;
+  hyperparameters.beta1 = 0;
+  hyperparameters.beta2 = 0.99;
+  hyperparameters.optimizerEpsilon = 1e-6;
+  hyperparameters.weightDecay = 0;
+
+  assert.equal(hyperparameters.learningRate, 0.001);
+  assert.equal(hyperparameters.beta1, 0);
+  assert.equal(hyperparameters.beta2, 0.99);
+  assert.equal(hyperparameters.optimizerEpsilon, 1e-6);
+  assert.equal(hyperparameters.weightDecay, 0);
+});
+
+test("the optimizer hyperparameter setters reject invalid values, leaving state unchanged", () => {
+  const hyperparameters = new Hyperparameters();
+
+  for (const value of [0, -0.001, Infinity, NaN]) {
+    assert.throws(() => { hyperparameters.learningRate = value; }, RangeError, `learningRate accepted ${value}`);
+    assert.throws(() => { hyperparameters.optimizerEpsilon = value; }, RangeError, `optimizerEpsilon accepted ${value}`);
+  }
+  for (const value of [-0.1, 1, 1.5, NaN]) {
+    assert.throws(() => { hyperparameters.beta1 = value; }, RangeError, `beta1 accepted ${value}`);
+    assert.throws(() => { hyperparameters.beta2 = value; }, RangeError, `beta2 accepted ${value}`);
+  }
+  for (const value of [-0.1, Infinity, NaN]) {
+    assert.throws(() => { hyperparameters.weightDecay = value; }, RangeError, `weightDecay accepted ${value}`);
+  }
+
+  assert.equal(hyperparameters.learningRate, 0.0004);
+  assert.equal(hyperparameters.beta1, 0.9);
+  assert.equal(hyperparameters.beta2, 0.999);
+  assert.equal(hyperparameters.optimizerEpsilon, 1e-8);
+  assert.equal(hyperparameters.weightDecay, 0.1);
+});
+
+test("the constructor rejects invalid optimizer hyperparameters", () => {
+  // Arguments 17 to 21 are learningRate, beta1, beta2, optimizerEpsilon and weightDecay.
+  const build = (learningRate: number, beta1: number, beta2: number, optimizerEpsilon: number, weightDecay: number) =>
+    new Hyperparameters(768, 12, 0.1, Hyperparameters.TRAINING_MODE, 12, 12, 2, false, true,
+      0.01, 0.02, 0.02, 0.02, 2, 0.9, 1, learningRate, beta1, beta2, optimizerEpsilon, weightDecay);
+
+  assert.doesNotThrow(() => build(0.0004, 0.9, 0.999, 1e-8, 0.1));
+  assert.throws(() => build(0, 0.9, 0.999, 1e-8, 0.1), RangeError);
+  assert.throws(() => build(0.0004, 1, 0.999, 1e-8, 0.1), RangeError);
+  assert.throws(() => build(0.0004, 0.9, -0.1, 1e-8, 0.1), RangeError);
+  assert.throws(() => build(0.0004, 0.9, 0.999, 0, 0.1), RangeError);
+  assert.throws(() => build(0.0004, 0.9, 0.999, 1e-8, -1), RangeError);
+});
+
 test("weight initialization standard deviation setters reject negative, infinite and NaN values, leaving state unchanged", () => {
   const hyperparameters = new Hyperparameters();
 

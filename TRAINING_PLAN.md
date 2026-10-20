@@ -521,47 +521,94 @@ through `GPTModel`.
 
 ---
 
-## Step 13: `GPTModel` backpropagation (whole model)
+## Step 13: `GPTModel` backpropagation (whole model) ✅ done
 
-**Changes**
+**What was done**
 - `backpropagate(outputErrors: number[][]): void` runs the chain in reverse:
   `linearOutputLayer → finalLayerNormalization → transformers (last to
-  first) → embeddingDropout → embedding`.
-- `calculateGradients(batchAverage)`: delegates to every component.
-- `backpropagate` takes the output errors, not the targets, so the model
-  contains no loss logic and the trainer shows where the errors come from.
+  first) → embeddingDropout → embedding`. It takes the errors at the
+  logits, not the targets, so the model contains no loss logic; the trainer
+  will work out the errors with `crossEntropyErrors`. The doc comment notes
+  that it must follow an `update()` in training or validation mode, since
+  generation mode only returns the last token's logits.
+- `calculateGradients(batchAverage)`: delegates to the embedding, every
+  block, the final layer normalization and the output layer.
 
-**Check**
-- `checkGradients` on the whole tiny model (2 blocks) with the **real loss**:
-  the forward function returns the logits, and the loss is
-  `Σ_t crossEntropyLoss(logits[t], target[t]) / contextLength`, with output
-  errors from `crossEntropyErrors(…, 1 / contextLength)`. Sample parameters
-  from the embedding, the first and last block, the final layer norm and the
-  output layer.
-- Step 1's reference logits are unchanged.
+**Check:** 4 new tests in `src/test/GPTModel.test.ts`, on a two-block model
+with the token ids `[464, 3290, 318, 3290]` and targets
+`[3290, 318, 3290, 13]`:
+- a gradient check of the **whole model with the real loss**: the mean
+  cross entropy over the window. The helper's made-up loss is
+  `output × R`, so the forward pass returns `[[meanLoss]]` and the output
+  errors are `crossEntropyErrors(row, target, R / 4)`. Parameters are
+  sampled from every kind of component:
+  - token embedding rows of tokens in the window;
+  - the position embeddings;
+  - block 0's query weights and layer-norm scale;
+  - block 1's value weights and feed forward weights and biases;
+  - the final layer-norm shift;
+  - output-layer rows for a target token and a non-target token;
+- the same check with dropout 0.2 (reseeding before each forward pass);
+- `calculateGradients` fills the gradients of every component (every
+  `gradientCount` is 1);
+- errors for the wrong number of tokens are rejected.
 
-At this point the model can calculate correct gradients for every parameter.
+**Two settings the whole-model check needs**, with comments explaining them
+in the test:
+- **A smaller step, `1e-4`.** With the default `1e-2`, the token-embedding
+  rows failed, some with numerical gradients of the opposite sign. The
+  embeddings are tiny (standard deviation 0.02), and the first layer
+  normalization magnifies changes in them about fifty times, so a step of
+  half their size is not local. With `1e-4` every check passes, which shows
+  the backpropagation was right and the step was the problem. This is worth
+  showing students: numerical gradients need a step that is small compared
+  with the values being nudged.
+- **An absolute tolerance of `1e-9`.** Gradients of a mean loss can be
+  around `1e-6`, which the default `1e-5` would pass whatever their value.
+
+**Mutation check:** removing the final layer normalization from the
+compiled backward pass makes both whole-model gradient checks fail.
+
+**Still runs:** all 143 tests pass, and `node dist/index.js` still
+generates text with the default (GPT-2 small) model in about 9 seconds. The
+step 1 reference logits in generation mode are unchanged, so the output is
+the same as before.
+
+At this point the model can calculate correct gradients for every
+parameter. Next: the optimizer (step 14).
 
 ---
 
-## Step 14: Optimizer hyperparameters and `AdamW`
+## Step 14: Optimizer hyperparameters and `AdamW` ✅ done
 
-**Changes**
-- `Hyperparameters` gets these values, with validation and setters in the
-  existing style:
+**What was done**
+- `Hyperparameters` has these values, as constructor parameters (arguments
+  17–21) and getters/setters with validation, in the existing style:
 
-  | Name | Default | Notes |
-  | --- | --- | --- |
-  | `learningRate` | 0.0004 | Book's chapter 5 value; dnn uses 0.001. |
-  | `beta1` | 0.9 | |
-  | `beta2` | 0.999 | |
-  | `optimizerEpsilon` | 1e-8 | Named to avoid confusion with `LayerNormalization.epsilon`. |
-  | `weightDecay` | 0.1 | Book's value; dnn uses 0.01. |
+  | Name | Default | Valid values | Notes |
+  | --- | --- | --- | --- |
+  | `learningRate` | 0.0004 | finite, > 0 | Book's chapter 5 value; dnn uses 0.001. |
+  | `beta1` | 0.9 | ≥ 0 and < 1 | |
+  | `beta2` | 0.999 | ≥ 0 and < 1 | |
+  | `optimizerEpsilon` | 1e-8 | finite, > 0 | Named to avoid confusion with `LayerNormalization.epsilon`. |
+  | `weightDecay` | 0.1 | finite, ≥ 0 | Book's value; dnn uses 0.01. 0 turns decay off. |
 
-- New `src/AdamW.ts`, a port of dnn's, adapted to `Float32Array`:
-  - `step()`: increments `t`; called once per batch before any updates.
-  - `updateVector(parameters: Float32Array, gradients: Float32Array, applyWeightDecay: boolean)`,
-    with `m` and `v` kept in a `WeakMap<Float32Array, {m, v}>`:
+  They go **before** `seed`, which stays the last, optional argument. This
+  moves `seed` from argument 17 to argument 22, but nothing passed it
+  positionally (everything sets `hyperparameters.seed` instead). Three new
+  validators: `validatePositiveNumber`, `validateBeta`,
+  `validateWeightDecay`.
+- New `src/AdamW.ts`, a port of dnn's, adapted to `Float32Array`. The class
+  comment explains momentum, the per-parameter step size and decoupled
+  weight decay for students:
+  - `constructor(hyperparameters)`: the hyperparameters are read on **every
+    update**, as in dnn, so changing the learning rate takes effect at once.
+  - `step()`: increments the step count; called once per batch before any
+    updates. `stepCount` getter.
+  - `updateVector(parameters: Float32Array, gradients: ArrayLike<number>, applyWeightDecay = false)`,
+    with `m` and `v` (Float32Arrays) kept in a `WeakMap<Float32Array, {m, v}>`
+    keyed by the parameter array. The doc comment explains why the bias
+    correction is needed:
 
     ```
     m = beta1 · m + (1 − beta1) · g
@@ -573,17 +620,38 @@ At this point the model can calculate correct gradients for every parameter.
     ```
 
   - `updateMatrix(weights: Matrix, gradients: Matrix, applyWeightDecay = true)`:
-    calls `updateVector(weights.data, gradients.data, …)`. Because `Matrix`
-    stores its values in one `Float32Array`, no row loop is needed.
-  - Throws if `step()` has not been called.
+    checks the shapes match, then calls
+    `updateVector(weights.data, gradients.data, …)`. Because `Matrix` stores
+    its values in one `Float32Array`, no row loop is needed.
+  - Throws `Error` if `step()` has not been called, and `RangeError` if the
+    gradients are the wrong size.
+  - As in dnn, the step count `t` is shared by all arrays rather than kept
+    per array (PyTorch keeps one per parameter). The two only differ for an
+    array that is first updated after some steps have passed, which does not
+    happen here: every array is updated at every step.
 
 **Check**
-- New `src/test/AdamW.test.ts`:
-  - after the first step, each parameter moves by ≈ `learningRate` against the
-    sign of its gradient (bias correction makes `mHat / sqrt(vHat) = ±1`);
-  - weight decay shrinks parameters with a zero gradient only when applied;
-  - two different arrays keep separate moments;
-  - calling an update before `step()` throws.
+- New `src/test/AdamW.test.ts` (10 tests):
+  - updating before `step()` throws; `stepCount` counts the steps;
+  - on the first step every parameter moves by `learningRate` against its
+    gradient, for gradients from 0.001 to 200 of both signs;
+  - a zero gradient leaves a parameter unchanged without weight decay and
+    multiplies it by `1 − learningRate · weightDecay` with it;
+  - three steps with changing gradients match a hand calculation of the
+    formula in 64-bit, to 1e-7;
+  - momentum: after ten steps one way, one reversed gradient does not
+    reverse the parameter's direction;
+  - two arrays with opposite constant gradients each move by exactly
+    `learningRate` per step (so their moments are separate);
+  - `updateMatrix` updates every value, with weight decay by default;
+  - a change to `learningRate` takes effect at the next update;
+  - gradients of the wrong size are rejected.
+- 4 new tests in `src/test/Hyperparameters.test.ts`: the defaults, the
+  setters storing valid values, the setters rejecting invalid ones without
+  changing state, and the constructor rejecting invalid values.
+
+**State after step 14:** 157 tests, all passing. The optimizer exists but is
+not connected to the model yet; that is step 15.
 
 ---
 
