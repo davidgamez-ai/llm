@@ -42,7 +42,7 @@ class LayerNormalization {
      * @returns A new array, the same length as values, holding the normalized, scaled and shifted values.
      * @throws RangeError if values is not embeddingSize long, since there would be no scale and shift for some values.
      */
-    calculate(values) {
+    update(values) {
         if (values.length !== this.embeddingSize) {
             throw new RangeError(`LayerNormalization| Expected ${this.embeddingSize} values; got ${values.length}`);
         }

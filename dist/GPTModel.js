@@ -72,7 +72,7 @@ class GPTModel {
      * @param tokenIds - Token ids of the tokenized input text, in sequence order.
      * @returns The logits, each row vocabularySize values wide: in training and validation modes one row per token, in token order; in generation mode a single row for the last token, scoring every candidate next token.
      */
-    calculate(tokenIds) {
+    update(tokenIds) {
         const embeddings = this.embedding.getEmbeddingFromTokens(tokenIds);
         /*
          * Dropout on the embeddings, only in training mode. Each value is set to
@@ -94,17 +94,17 @@ class GPTModel {
         // Pass the embeddings through each transformer block in sequence, feeding each block's output into the next.
         let transformerOutput = droppedEmbeddings;
         for (const transformer of this.transformers) {
-            transformerOutput = transformer.calculate(transformerOutput);
+            transformerOutput = transformer.update(transformerOutput);
         }
         // Final layer normalization, applied to each token vector independently, as in GPT-2.
-        const normalizedOutput = transformerOutput.map((vector) => this.finalLayerNormalization.calculate(vector));
+        const normalizedOutput = transformerOutput.map((vector) => this.finalLayerNormalization.update(vector));
         if (DEBUG.GPT_MODEL) {
             console.log("GPTModel| Output of final layer normalization (one row per token):");
             if (DEBUG.VERBOSE)
                 console.table(normalizedOutput);
         }
         // Logits for every token in training and validation modes; for the last token only in generation mode.
-        return this.linearOutputLayer.calculate(normalizedOutput);
+        return this.linearOutputLayer.update(normalizedOutput);
     }
     /**
      * Counts the trainable parameters in the whole model: the embedding, every

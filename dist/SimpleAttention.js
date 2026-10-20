@@ -17,7 +17,7 @@ class SimpleAttention {
      * @param embeddings - Token embeddings as produced by Embedding.getEmbedding(): one row per token, each row embeddingSize values wide.
      * @returns A tokenCount x tokenCount matrix of attention weights, where entry [i][j] is token i's normalized attention score for token j, and each row sums to 1.
      */
-    calculate(embeddings) {
+    update(embeddings) {
         // Step 1: note the shape of the input so the calculation can be
         // followed from the start.
         console.log(`SimpleAttention| Calculating attention scores for ${embeddings.length} tokens, each embedding ${embeddings[0]?.length ?? 0} values wide.`);

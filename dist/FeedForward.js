@@ -10,7 +10,7 @@ import DEBUG from "./Debug.js";
  *
  * The network processes one token vector at a time. Every token in a
  * sequence goes through the same weights independently, so a whole
- * sequence is processed by calling calculate() on each of its tokens.
+ * sequence is processed by calling update() on each of its tokens.
  * The shapes as data flows through the network are:
  *
  * - First linear layer: embeddingSize in, 4 * embeddingSize out.
@@ -97,7 +97,7 @@ class FeedForward {
      * @param token - The embedding of one token: embeddingSize values.
      * @returns The transformed token vector: embeddingSize values.
      */
-    calculate(token) {
+    update(token) {
         /*
          * GELU using the tanh approximation from the original GPT-2 code:
          * 0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3))).

@@ -12,7 +12,7 @@ class Context {
    * to produce that token's context vector.
    *
    * @param embeddings - Token embeddings as produced by Embedding.getEmbedding(): one row per token, each row embeddingSize values wide.
-   * @param attentionScores - Attention weights as produced by SimpleAttention.calculate(): a tokenCount x tokenCount matrix where entry [i][j] is token i's attention weight for token j.
+   * @param attentionScores - Attention weights as produced by SimpleAttention.update(): a tokenCount x tokenCount matrix where entry [i][j] is token i's attention weight for token j.
    * @returns One context vector per token, in token order, each embeddingSize values wide.
    */
   getContext(embeddings: number[][], attentionScores: number[][]): number[][] {

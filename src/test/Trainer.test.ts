@@ -26,7 +26,7 @@ const TEXT: string = Array.from({ length: 200 }, (_, i) => `Sentence ${i} is abo
  * Builds a tiny model (embeddingSize 8, 2 heads, 1 block) so the tests run
  * quickly, with contextLength 4 and batchSize 3. It starts in
  * GENERATION_MODE so the tests can check the mode is restored. Every call to
- * the model's calculate() is recorded, with the mode it was called in.
+ * the model's update() is recorded, with the mode it was called in.
  */
 const setUp = (numberEpochs: number = 1) => {
   const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.GENERATION_MODE, 2, 1, 3);
@@ -35,10 +35,10 @@ const setUp = (numberEpochs: number = 1) => {
   const model = new GPTModel(hyperparameters);
 
   const calls: { inputs: number[]; mode: number }[] = [];
-  const calculate = model.calculate.bind(model);
-  model.calculate = (inputs: number[]) => {
+  const update = model.update.bind(model);
+  model.update = (inputs: number[]) => {
     calls.push({ inputs: [...inputs], mode: hyperparameters.mode });
-    return calculate(inputs);
+    return update(inputs);
   };
 
   const trainer = new Trainer(hyperparameters, model);

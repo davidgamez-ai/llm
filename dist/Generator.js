@@ -68,7 +68,7 @@ class Generator {
              * sequence grows longer than that, the earliest tokens are dropped.
              */
             const context = [...tokenIds, ...generatedIds].slice(-this.hyperparameters.contextLength);
-            const logits = this.model.calculate(context);
+            const logits = this.model.update(context);
             /*
              * Only the last row of logits is needed: it scores every candidate for
              * the token that follows the whole input. In generation mode the model

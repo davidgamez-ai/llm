@@ -68,7 +68,7 @@ class MultiHeadAttention {
                 `weight standard deviation: ${standardDeviation}`);
     }
     /**
-     * Calls calculate() on each attention head in turn with the same
+     * Calls update() on each attention head in turn with the same
      * embeddings, then concatenates the heads' context vectors token by
      * token. Row i of the concatenation is head 0's context vector for token
      * i, followed by head 1's, and so on, giving a tokenCount x
@@ -80,12 +80,12 @@ class MultiHeadAttention {
      * @param embeddings - Token embeddings as produced by Embedding.getEmbedding(): one row per token, each row embeddingSize values wide.
      * @returns The projected context vectors: one row per token, in token order, each embeddingSize values wide.
      */
-    calculate(embeddings) {
+    update(embeddings) {
         // One tokenCount x weightMatrixColumns matrix of context vectors per head.
         const headContextVectors = this.attentionHeads.map((head, headIndex) => {
             if (DEBUG.ATTENTION)
                 console.log(`MultiHeadAttention| Calculating attention head ${headIndex}.`);
-            return head.calculate(embeddings);
+            return head.update(embeddings);
         });
         /*
          * Concatenate along the last dimension: for each token, join the

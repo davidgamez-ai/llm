@@ -250,7 +250,7 @@ class Trainer {
      */
     calculateTotalLoss(inputs, targets) {
         // In training and validation modes the model returns one row of logits per input token.
-        const logits = this.model.calculate(inputs);
+        const logits = this.model.update(inputs);
         let totalLoss = 0;
         for (let position = 0; position < logits.length; position++) {
             const row = logits[position];

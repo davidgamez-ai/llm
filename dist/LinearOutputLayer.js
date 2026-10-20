@@ -89,7 +89,7 @@ class LinearOutputLayer {
      * @param embeddings - Token embeddings: one row per token, each row embeddingSize values wide.
      * @returns The logits, each row vocabSize values wide: in training and validation modes one row per token, in token order; in generation mode a single row for the last token.
      */
-    calculate(embeddings) {
+    update(embeddings) {
         const selectedEmbeddings = this.mode === Hyperparameters.GENERATION_MODE ? embeddings.slice(-1) : embeddings;
         // weights has one row per vocabulary token, so each logit is one row of weights dotted with the embedding.
         const logits = selectedEmbeddings.map((embedding) => matrixTimesVector(this.weights, embedding));

@@ -91,11 +91,11 @@ class Transformer {
    * @param embeddings - Token embeddings: one row per token, each row embeddingSize values wide.
    * @returns The output of the block: one row per token, in token order, each row embeddingSize values wide.
    */
-  calculate(embeddings: number[][]): number[][] {
+  update(embeddings: number[][]): number[][] {
     // Normalize each token embedding independently before attention.
-    const normalizedEmbeddings = embeddings.map((embedding) => this.attentionLayerNormalization.calculate(embedding));
+    const normalizedEmbeddings = embeddings.map((embedding) => this.attentionLayerNormalization.update(embedding));
 
-    const attentionOutput = this.multiHeadAttention.calculate(normalizedEmbeddings);
+    const attentionOutput = this.multiHeadAttention.update(normalizedEmbeddings);
 
     // Dropout on the attention output before it is added to the shortcut (training mode only).
     const droppedAttentionOutput = this.dropout(attentionOutput, "Attention output");
@@ -110,10 +110,10 @@ class Transformer {
     const shortcutOutput = this.add(droppedAttentionOutput, embeddings);
 
     // Normalize each shortcut output vector independently before the feed forward network.
-    const normalizedShortcutOutput = shortcutOutput.map((vector) => this.feedForwardLayerNormalization.calculate(vector));
+    const normalizedShortcutOutput = shortcutOutput.map((vector) => this.feedForwardLayerNormalization.update(vector));
 
     // The feed forward network processes one token vector at a time.
-    const feedForwardOutput = normalizedShortcutOutput.map((vector) => this.feedForward.calculate(vector));
+    const feedForwardOutput = normalizedShortcutOutput.map((vector) => this.feedForward.update(vector));
 
     // Dropout on the feed forward output before it is added to the shortcut (training mode only).
     const droppedFeedForwardOutput = this.dropout(feedForwardOutput, "Feed forward output");

@@ -144,7 +144,7 @@ class GPTAttention {
    * @param embeddings - Token embeddings as produced by Embedding.getEmbedding(): one row per token, each row embeddingSize values wide.
    * @returns The context vectors: a tokenCount x weightMatrixColumns matrix where row i is the causally masked, attention-weighted (and, in training mode, dropout-applied) sum of the value vectors of tokens 0..i.
    */
-  calculate(embeddings: number[][]): number[][] {
+  update(embeddings: number[][]): number[][] {
     if(DEBUG.ATTENTION) console.log(
       `GPTAttention| Calculating queries, keys and values for ${embeddings.length} tokens.`
     );

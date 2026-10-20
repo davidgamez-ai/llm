@@ -79,7 +79,7 @@ class Generator {
        */
       const context:number[] = [...tokenIds, ...generatedIds].slice(-this.hyperparameters.contextLength);
 
-      const logits:number[][] = this.model.calculate(context);
+      const logits:number[][] = this.model.update(context);
 
       /*
        * Only the last row of logits is needed: it scores every candidate for
