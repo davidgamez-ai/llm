@@ -29,9 +29,12 @@ class SimpleAttention {
             const scoresForToken = [];
             for (let j = 0; j < embeddings.length; j++) {
                 const vectorB = embeddings[j];
-                // Step 3: reduce the pair of vectors, element by element, into a
-                // single dot-product score, which is that pair's raw attention score.
-                const dotProduct = vectorA.reduce((sum, value, index) => sum + value * vectorB[index], 0);
+                // Step 3: multiply the pair of vectors element by element and add up
+                // the products: the dot product, which is that pair's raw attention score.
+                let dotProduct = 0;
+                for (let index = 0; index < vectorA.length; index++) {
+                    dotProduct += vectorA[index] * vectorB[index];
+                }
                 scoresForToken.push(dotProduct);
             }
             rawScores.push(scoresForToken);

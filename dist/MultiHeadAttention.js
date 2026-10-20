@@ -1,5 +1,7 @@
 import Hyperparameters from "./Hyperparameters.js";
 import GPTAttention from "./GPTAttention.js";
+import { randomNormalMatrix, residualProjectionStandardDeviation } from "./WeightInitialization.js";
+import Matrix, { vectorTimesMatrix } from "./Matrix.js";
 import DEBUG from "./Debug.js";
 /**
  * Runs several GPTAttention heads over the same token embeddings,
@@ -17,12 +19,12 @@ class MultiHeadAttention {
     embeddingSize;
     /** Number of transformer blocks in the model, used to scale the output projection's initial weights. */
     numberTransformerBlocks;
-    /** Base standard deviation for the output projection's initial weights, before scaling by 1 / sqrt(2 * numberTransformerBlocks). */
-    attentionProjectionStandardDeviation;
+    /** Standard deviation for linear layer weights (0.02 in GPT-2); the output projection uses it scaled by 1 / sqrt(2 * numberTransformerBlocks). */
+    linearLayerStandardDeviation;
     /** Output projection weights built by build(): embeddingSize rows by embeddingSize columns. */
-    outputProjectionWeights = [];
+    outputProjectionWeights = new Matrix(0, 0);
     /** Output projection biases built by build(): embeddingSize values. */
-    outputProjectionBiases = [];
+    outputProjectionBiases = new Float32Array(0);
     /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
     random;
     /**
@@ -31,12 +33,12 @@ class MultiHeadAttention {
      * same dimensions, dropout rate and training mode, then builds the
      * output projection.
      *
-     * @param hyperparameters - Source of numberAttentionHeads, embeddingSize, numberTransformerBlocks, attentionProjectionStandardDeviation and the random number stream, and passed on to each GPTAttention head. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of numberAttentionHeads, embeddingSize, numberTransformerBlocks, linearLayerStandardDeviation and the random number stream, and passed on to each GPTAttention head. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.embeddingSize = hyperparameters.embeddingSize;
         this.numberTransformerBlocks = hyperparameters.numberTransformerBlocks;
-        this.attentionProjectionStandardDeviation = hyperparameters.attentionProjectionStandardDeviation;
+        this.linearLayerStandardDeviation = hyperparameters.linearLayerStandardDeviation;
         this.random = () => hyperparameters.random();
         this.attentionHeads = Array.from({ length: hyperparameters.numberAttentionHeads }, () => new GPTAttention(hyperparameters));
         if (DEBUG.ATTENTION)
@@ -46,36 +48,21 @@ class MultiHeadAttention {
     /**
      * Builds the output projection: an embeddingSize x embeddingSize weight
      * matrix and an embeddingSize bias vector, stored on the instance.
-     * Initialized as in GPT-2 (Hugging Face GPT2Model._init_weights):
+     * Initialized as in GPT-2 (Hugging Face GPT2PreTrainedModel._init_weights,
+     * for GPT-2's attention c_proj):
      * - Weights are drawn from a normal distribution with mean 0 and standard
-     *   deviation attentionProjectionStandardDeviation (0.02 by default)
-     *   divided by sqrt(2 * numberTransformerBlocks).
+     *   deviation linearLayerStandardDeviation (0.02 by default)
+     *   divided by sqrt(2 * numberTransformerBlocks), because the output
+     *   projection is a residual projection (see WeightInitialization).
      * - Biases are set to 0.
      *
      * @returns void. The resulting weights and biases are stored on the instance.
      */
     build() {
-        /*
-         * GPT-2's base standard deviation for linear layers is 0.02. The output
-         * projection writes into the residual stream, and every transformer
-         * block adds two such contributions to it (attention and feed forward),
-         * so the GPT-2 paper scales these weights by 1 / sqrt(2 * numberOfBlocks)
-         * to stop the residual stream's variance growing with the model's depth.
-         */
-        const standardDeviation = this.attentionProjectionStandardDeviation / Math.sqrt(2 * this.numberTransformerBlocks);
-        /*
-         * Draws one sample from a normal distribution with mean 0 and the given
-         * standard deviation, using the Box-Muller transform to turn two uniform
-         * samples into a standard normal sample. 1 - random() lies in (0, 1],
-         * so Math.log never receives 0.
-         */
-        const randomNormal = (deviation) => {
-            const u1 = 1 - this.random();
-            const u2 = this.random();
-            return deviation * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-        };
-        this.outputProjectionWeights = Array.from({ length: this.embeddingSize }, () => Array.from({ length: this.embeddingSize }, () => randomNormal(standardDeviation)));
-        this.outputProjectionBiases = new Array(this.embeddingSize).fill(0);
+        const standardDeviation = residualProjectionStandardDeviation(this.linearLayerStandardDeviation, this.numberTransformerBlocks);
+        this.outputProjectionWeights = randomNormalMatrix(this.embeddingSize, this.embeddingSize, standardDeviation, this.random);
+        // A new Float32Array is filled with zeros, so the biases start at 0.
+        this.outputProjectionBiases = new Float32Array(this.embeddingSize);
         if (DEBUG.ATTENTION)
             console.log(`MultiHeadAttention| Output projection built. Rows: ${this.embeddingSize}; columns: ${this.embeddingSize}; ` +
                 `weight standard deviation: ${standardDeviation}`);
@@ -105,20 +92,29 @@ class MultiHeadAttention {
          * context vectors that every head produced for that token into a
          * single row, in head order.
          */
-        const contextVectors = embeddings.map((_, token) => headContextVectors.flatMap((headVectors) => headVectors[token]));
+        const contextVectors = [];
+        for (let token = 0; token < embeddings.length; token++) {
+            const concatenated = [];
+            for (const headVectors of headContextVectors) {
+                concatenated.push(...headVectors[token]);
+            }
+            contextVectors.push(concatenated);
+        }
         /*
          * Check that every concatenated context vector is embeddingSize wide,
          * so the output can be fed to later layers that expect token vectors
          * of the same width as the embeddings. Mismatches are always logged;
          * success is only logged when attention debugging is on.
          */
-        const wrongLengthTokens = contextVectors
-            .map((vector, token) => ({ token, length: vector.length }))
-            .filter(({ length }) => length !== this.embeddingSize);
-        if (wrongLengthTokens.length > 0) {
-            wrongLengthTokens.forEach(({ token, length }) => console.error(`MultiHeadAttention| Context vector for token ${token} has length ${length}; expected embeddingSize ${this.embeddingSize}.`));
+        let allCorrectLength = true;
+        for (let token = 0; token < contextVectors.length; token++) {
+            if (contextVectors[token].length !== this.embeddingSize) {
+                allCorrectLength = false;
+                console.error(`MultiHeadAttention| Context vector for token ${token} has length ${contextVectors[token].length}; ` +
+                    `expected embeddingSize ${this.embeddingSize}.`);
+            }
         }
-        else if (DEBUG.ATTENTION) {
+        if (allCorrectLength && DEBUG.ATTENTION) {
             console.log(`MultiHeadAttention| All context vectors have length embeddingSize (${this.embeddingSize}).`);
         }
         if (DEBUG.CONTEXT) {
@@ -126,11 +122,11 @@ class MultiHeadAttention {
             console.table(contextVectors);
         }
         /*
-         * Output projection: each output value is the dot product of the
-         * concatenated context vector with one column of
-         * outputProjectionWeights, plus that column's bias.
+         * Output projection: a linear layer applied to each concatenated context
+         * vector. Each output value is the dot product of the vector with one
+         * column of outputProjectionWeights, plus that column's bias.
          */
-        const projectedVectors = contextVectors.map((vector) => this.outputProjectionBiases.map((bias, column) => vector.reduce((sum, value, row) => sum + value * this.outputProjectionWeights[row][column], bias)));
+        const projectedVectors = contextVectors.map((vector) => vectorTimesMatrix(vector, this.outputProjectionWeights, this.outputProjectionBiases));
         if (DEBUG.CONTEXT) {
             console.log("MultiHeadAttention| Projected context vectors (one row per token):");
             console.table(projectedVectors);
@@ -146,8 +142,7 @@ class MultiHeadAttention {
      */
     getParameterCount() {
         const headParameters = this.attentionHeads.reduce((sum, head) => sum + head.getParameterCount(), 0);
-        const projectionWeights = this.outputProjectionWeights.reduce((sum, row) => sum + row.length, 0);
-        return headParameters + projectionWeights + this.outputProjectionBiases.length;
+        return headParameters + this.outputProjectionWeights.size + this.outputProjectionBiases.length;
     }
 }
 export default MultiHeadAttention;

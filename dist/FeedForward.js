@@ -1,4 +1,6 @@
 import Hyperparameters from "./Hyperparameters.js";
+import { randomNormalMatrix, residualProjectionStandardDeviation } from "./WeightInitialization.js";
+import Matrix, { vectorTimesMatrix } from "./Matrix.js";
 import DEBUG from "./Debug.js";
 /**
  * The position-wise feed forward network used in each GPT transformer
@@ -23,26 +25,33 @@ class FeedForward {
     /** True if the linear layers add a bias to their outputs; false if they do not. */
     bias;
     /** First linear layer weights built by build(): embeddingSize rows by hiddenSize columns. */
-    firstLayerWeights = [];
+    firstLayerWeights = new Matrix(0, 0);
     /** First linear layer biases built by build(): one per hidden unit, hiddenSize values. Empty when bias is false. */
-    firstLayerBiases = [];
+    firstLayerBiases = new Float32Array(0);
     /** Second linear layer weights built by build(): hiddenSize rows by embeddingSize columns. */
-    secondLayerWeights = [];
+    secondLayerWeights = new Matrix(0, 0);
     /** Second linear layer biases built by build(): one per output unit, embeddingSize values. Empty when bias is false. */
-    secondLayerBiases = [];
+    secondLayerBiases = new Float32Array(0);
+    /** Standard deviation for linear layer weights (0.02 in GPT-2); the second layer uses it scaled by 1 / sqrt(2 * numberTransformerBlocks). */
+    linearLayerStandardDeviation;
+    /** Number of transformer blocks in the model, used to scale the second layer's initial weights. */
+    numberTransformerBlocks;
     /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
     random;
     /**
-     * Creates a FeedForward, copying embeddingSize and feedForwardBias from
-     * the given Hyperparameters so this instance always matches the values
-     * used elsewhere in the application, then builds the network.
+     * Creates a FeedForward, copying embeddingSize, feedForwardBias,
+     * linearLayerStandardDeviation and numberTransformerBlocks from the given
+     * Hyperparameters so this instance always matches the values used
+     * elsewhere in the application, then builds the network.
      *
-     * @param hyperparameters - Source of embeddingSize, feedForwardBias and the random number stream. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of embeddingSize, feedForwardBias, linearLayerStandardDeviation, numberTransformerBlocks and the random number stream. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.embeddingSize = hyperparameters.embeddingSize;
         this.hiddenSize = 4 * this.embeddingSize;
         this.bias = hyperparameters.feedForwardBias;
+        this.linearLayerStandardDeviation = hyperparameters.linearLayerStandardDeviation;
+        this.numberTransformerBlocks = hyperparameters.numberTransformerBlocks;
         this.random = () => hyperparameters.random();
         this.build();
     }
@@ -51,41 +60,34 @@ class FeedForward {
      * on the instance. The first layer maps embeddingSize inputs to hiddenSize
      * (4 * embeddingSize) outputs; the second maps hiddenSize inputs back to
      * embeddingSize outputs. The GELU activation between them has no
-     * parameters, so nothing is built for it. Weights and biases are
-     * initialized the same way as PyTorch's nn.Linear: drawn uniformly from
-     * [-1/sqrt(fanIn), 1/sqrt(fanIn)), where fanIn is the layer's input width.
-     * Biases are only built when bias is true; otherwise the bias arrays are
-     * left empty.
+     * parameters, so nothing is built for it. Initialized as in GPT-2 (Hugging
+     * Face GPT2PreTrainedModel._init_weights, for GPT-2's mlp.c_fc and
+     * mlp.c_proj):
+     * - First layer weights are drawn from a normal distribution with mean 0
+     *   and standard deviation linearLayerStandardDeviation (0.02 by default).
+     * - Second layer weights use that standard deviation divided by
+     *   sqrt(2 * numberTransformerBlocks), because the second layer is a
+     *   residual projection: its output is added straight to the residual
+     *   stream (see WeightInitialization).
+     * - Biases are set to 0. They are only built when bias is true; otherwise
+     *   the bias arrays are left empty.
      *
      * @returns void. The resulting weights and biases are stored on the instance.
      */
     build() {
-        /*
-         * A fresh rows x columns matrix of random values in [-bound, bound),
-         * where bound = 1 / sqrt(rows). rows is the layer's fan in, so scaling
-         * by it keeps the variance of each layer's output roughly independent
-         * of its input width.
-         */
-        const buildMatrix = (rows, columns) => {
-            const bound = 1 / Math.sqrt(rows);
-            return Array.from({ length: rows }, () => Array.from({ length: columns }, () => (this.random() * 2 - 1) * bound));
-        };
-        // A bias vector with the same bound as the matching weight matrix, as in nn.Linear.
-        const buildBiases = (fanIn, length) => {
-            const bound = 1 / Math.sqrt(fanIn);
-            return Array.from({ length }, () => (this.random() * 2 - 1) * bound);
-        };
-        this.firstLayerWeights = buildMatrix(this.embeddingSize, this.hiddenSize);
-        this.secondLayerWeights = buildMatrix(this.hiddenSize, this.embeddingSize);
-        this.firstLayerBiases = this.bias ? buildBiases(this.embeddingSize, this.hiddenSize) : [];
-        this.secondLayerBiases = this.bias ? buildBiases(this.hiddenSize, this.embeddingSize) : [];
+        const secondLayerStandardDeviation = residualProjectionStandardDeviation(this.linearLayerStandardDeviation, this.numberTransformerBlocks);
+        this.firstLayerWeights = randomNormalMatrix(this.embeddingSize, this.hiddenSize, this.linearLayerStandardDeviation, this.random);
+        this.secondLayerWeights = randomNormalMatrix(this.hiddenSize, this.embeddingSize, secondLayerStandardDeviation, this.random);
+        // A new Float32Array is filled with zeros, so the biases start at 0.
+        this.firstLayerBiases = new Float32Array(this.bias ? this.hiddenSize : 0);
+        this.secondLayerBiases = new Float32Array(this.bias ? this.embeddingSize : 0);
         if (DEBUG.FEED_FORWARD) {
             console.log(`FeedForward| Network built. Input: ${this.embeddingSize}; ` +
                 `hidden: ${this.hiddenSize}; output: ${this.embeddingSize}`);
             console.log("FeedForward| First layer weights:");
-            console.table(this.firstLayerWeights);
+            console.table(this.firstLayerWeights.toArrays());
             console.log("FeedForward| Second layer weights:");
-            console.table(this.secondLayerWeights);
+            console.table(this.secondLayerWeights.toArrays());
         }
     }
     /**
@@ -97,21 +99,20 @@ class FeedForward {
      */
     calculate(token) {
         /*
-         * A linear layer applied to a single vector: each output value is the
-         * dot product of the vector with one column of the weight matrix, plus
-         * that column's bias when bias is true. The dot product starts from the
-         * bias, or from 0 when there is no bias.
-         */
-        const linear = (vector, weights, biases) => weights[0].map((_, column) => vector.reduce((sum, value, row) => sum + value * weights[row][column], this.bias ? biases[column] : 0));
-        /*
          * GELU using the tanh approximation from the original GPT-2 code:
          * 0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3))).
          * Unlike ReLU it is smooth and lets small negative values through,
          * which gives non-zero gradients for negative inputs.
          */
         const gelu = (x) => 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x ** 3)));
-        const hidden = linear(token, this.firstLayerWeights, this.firstLayerBiases).map(gelu);
-        const output = linear(hidden, this.secondLayerWeights, this.secondLayerBiases);
+        /*
+         * Each linear layer multiplies the vector by its weight matrix and adds
+         * its biases (which are empty when bias is false): each output value is
+         * the dot product of the vector with one column of the weight matrix,
+         * plus that column's bias.
+         */
+        const hidden = vectorTimesMatrix(token, this.firstLayerWeights, this.firstLayerBiases).map(gelu);
+        const output = vectorTimesMatrix(hidden, this.secondLayerWeights, this.secondLayerBiases);
         if (DEBUG.FEED_FORWARD) {
             console.log("FeedForward| Output:");
             console.table(output);
@@ -126,10 +127,9 @@ class FeedForward {
      * @returns The total number of weights and biases currently stored on the instance.
      */
     getParameterCount() {
-        const countMatrix = (matrix) => matrix.reduce((sum, row) => sum + row.length, 0);
-        return (countMatrix(this.firstLayerWeights) +
+        return (this.firstLayerWeights.size +
             this.firstLayerBiases.length +
-            countMatrix(this.secondLayerWeights) +
+            this.secondLayerWeights.size +
             this.secondLayerBiases.length);
     }
 }

@@ -10,8 +10,8 @@ import DEBUG from "./Debug.js";
  * stack of transformer blocks in sequence, with the output of each block
  * becoming the input to the next. Layer normalization is then applied to the
  * output of the last transformer block, and the linear output layer turns
- * the result into logits (training mode) or a probability distribution over
- * the next token (inference mode).
+ * the result into logits: for every token in training and validation modes,
+ * or for the last token only in generation mode.
  */
 class GPTModel {
     /** Converts token ids into combined token and position embeddings. */
@@ -25,15 +25,16 @@ class GPTModel {
     /** Probability, between 0 and 1, that each embedding value is dropped (set to zero) by dropout. */
     dropoutRate;
     /**
-     * True in training mode, when dropout is applied to the embeddings; false
-     * in inference mode, when it is skipped. Read from Hyperparameters on every
-     * access, so changing Hyperparameters.training after construction takes effect.
+     * The current mode: Hyperparameters.TRAINING_MODE, VALIDATION_MODE or
+     * GENERATION_MODE. Dropout is only applied to the embeddings in
+     * TRAINING_MODE. Read from Hyperparameters on every access, so changing
+     * Hyperparameters.mode after construction takes effect.
      */
-    get training() {
-        return this.isTraining();
+    get mode() {
+        return this.getMode();
     }
-    /** Reads the Hyperparameters' current training flag. */
-    isTraining;
+    /** Reads the Hyperparameters' current mode. */
+    getMode;
     /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
     random;
     /**
@@ -44,11 +45,11 @@ class GPTModel {
      * random values from the Hyperparameters' shared stream, so the whole
      * model is reproducible when Hyperparameters.seed is set.
      *
-     * @param hyperparameters - Source of numberTransformerBlocks, dropoutRate, training and the random number stream, and passed on to Embedding, each Transformer, LayerNormalization and LinearOutputLayer. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of numberTransformerBlocks, dropoutRate, mode and the random number stream, and passed on to Embedding, each Transformer, LayerNormalization and LinearOutputLayer. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.dropoutRate = hyperparameters.dropoutRate;
-        this.isTraining = () => hyperparameters.training;
+        this.getMode = () => hyperparameters.mode;
         this.random = () => hyperparameters.random();
         this.embedding = new Embedding(hyperparameters);
         this.embedding.build();
@@ -69,7 +70,7 @@ class GPTModel {
      * normalization of the final block's output, then the linear output layer.
      *
      * @param tokenIds - Token ids of the tokenized input text, in sequence order.
-     * @returns Each row vocabularySize values wide: in training mode the logits, one row per token, in token order; in inference mode a single row of probabilities for the next token.
+     * @returns The logits, each row vocabularySize values wide: in training and validation modes one row per token, in token order; in generation mode a single row for the last token, scoring every candidate next token.
      */
     calculate(tokenIds) {
         const embeddings = this.embedding.getEmbeddingFromTokens(tokenIds);
@@ -77,10 +78,11 @@ class GPTModel {
          * Dropout on the embeddings, only in training mode. Each value is set to
          * 0 with probability dropoutRate; the values that are kept are scaled by
          * 1 / (1 - dropoutRate) so the expected size of each value is unchanged,
-         * as in Transformer. In inference mode the embeddings are used unchanged.
+         * as in Transformer. In validation and generation modes the embeddings
+         * are used unchanged.
          */
         let droppedEmbeddings = embeddings;
-        if (this.training) {
+        if (this.mode === Hyperparameters.TRAINING_MODE) {
             const keepScale = 1 / (1 - this.dropoutRate);
             droppedEmbeddings = embeddings.map((vector) => vector.map((value) => (this.random() < this.dropoutRate ? 0 : value * keepScale)));
             if (DEBUG.GPT_MODEL) {
@@ -101,13 +103,18 @@ class GPTModel {
             if (DEBUG.VERBOSE)
                 console.table(normalizedOutput);
         }
-        // Logits for every token in training mode; probabilities for the next token in inference mode.
+        // Logits for every token in training and validation modes; for the last token only in generation mode.
         return this.linearOutputLayer.calculate(normalizedOutput);
     }
     /**
      * Counts the trainable parameters in the whole model: the embedding, every
      * transformer block, the final layer normalization and the linear output
      * layer. Dropout has no parameters.
+     *
+     * The count depends on contextLength, because the position embedding has
+     * one row per position. With the default Hyperparameters it only matches
+     * the book's 163,009,536 when contextLength is set to GPT-2's 1024; the
+     * default contextLength of 12 gives 777,216 fewer (162,232,320).
      *
      * @returns The total number of parameters in the model.
      */

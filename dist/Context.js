@@ -32,8 +32,9 @@ class Context {
                 const weight = weightsForToken[j];
                 // Step 3: scale this token's embedding vector by its attention
                 // weight, then add the scaled vector into the running total.
-                const weightedEmbedding = embedding.map((value) => value * weight);
-                contextVector = contextVector.map((value, index) => value + weightedEmbedding[index]);
+                for (let index = 0; index < embedding.length; index++) {
+                    contextVector[index] += embedding[index] * weight;
+                }
             }
             contextVectors.push(contextVector);
             console.log(`Context| Context vector for token ${i}:`, contextVector);

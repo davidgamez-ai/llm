@@ -28,8 +28,9 @@ class LayerNormalization {
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.embeddingSize = hyperparameters.embeddingSize;
-        this.scale = new Array(this.embeddingSize).fill(1);
-        this.shift = new Array(this.embeddingSize).fill(0);
+        this.scale = new Float32Array(this.embeddingSize).fill(1);
+        // A new Float32Array is filled with zeros, so the shift starts at 0.
+        this.shift = new Float32Array(this.embeddingSize);
     }
     /**
      * Normalizes the values so they have a mean of 0 and a variance of 1, by
@@ -52,7 +53,13 @@ class LayerNormalization {
          */
         const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
         const standardDeviation = Math.sqrt(variance + LayerNormalization.epsilon);
-        return values.map((value, index) => this.scale[index] * ((value - mean) / standardDeviation) + this.shift[index]);
+        // Normalize each value, then apply that dimension's own scale and shift.
+        const output = [];
+        for (let i = 0; i < values.length; i++) {
+            const normalized = (values[i] - mean) / standardDeviation;
+            output.push(this.scale[i] * normalized + this.shift[i]);
+        }
+        return output;
     }
     /**
      * Counts the trainable parameters: every value in scale and shift.

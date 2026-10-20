@@ -5,36 +5,103 @@ import Hyperparameters from "../Hyperparameters.js";
 const NON_POSITIVE_INTEGERS = [0, -1, 1.5, NaN, Infinity];
 test("unvalidated setters store the new value", () => {
     const hyperparameters = new Hyperparameters();
-    hyperparameters.contextLength = 256;
-    hyperparameters.training = false;
     hyperparameters.qkvBias = true;
     hyperparameters.feedForwardBias = false;
-    assert.equal(hyperparameters.contextLength, 256);
-    assert.equal(hyperparameters.training, false);
     assert.equal(hyperparameters.qkvBias, true);
     assert.equal(hyperparameters.feedForwardBias, false);
 });
+test("contextLength setter stores a positive whole number", () => {
+    const hyperparameters = new Hyperparameters();
+    hyperparameters.contextLength = 256;
+    assert.equal(hyperparameters.contextLength, 256);
+});
+test("contextLength setter rejects invalid values and leaves state unchanged", () => {
+    const hyperparameters = new Hyperparameters();
+    for (const value of NON_POSITIVE_INTEGERS) {
+        assert.throws(() => { hyperparameters.contextLength = value; }, RangeError, `accepted ${value}`);
+    }
+    assert.equal(hyperparameters.contextLength, 12);
+});
+test("trainingRatio defaults to 0.9 and numberEpochs to 1", () => {
+    const hyperparameters = new Hyperparameters();
+    assert.equal(hyperparameters.trainingRatio, 0.9);
+    assert.equal(hyperparameters.numberEpochs, 1);
+});
+test("trainingRatio setter stores values between 0 and 1", () => {
+    const hyperparameters = new Hyperparameters();
+    hyperparameters.trainingRatio = 0.75;
+    assert.equal(hyperparameters.trainingRatio, 0.75);
+});
+test("trainingRatio setter rejects 0, 1, values outside them and NaN, leaving state unchanged", () => {
+    const hyperparameters = new Hyperparameters();
+    for (const value of [0, 1, -0.1, 1.1, NaN]) {
+        assert.throws(() => { hyperparameters.trainingRatio = value; }, RangeError, `accepted ${value}`);
+    }
+    assert.equal(hyperparameters.trainingRatio, 0.9);
+});
+test("numberEpochs setter stores a positive whole number", () => {
+    const hyperparameters = new Hyperparameters();
+    hyperparameters.numberEpochs = 10;
+    assert.equal(hyperparameters.numberEpochs, 10);
+});
+test("numberEpochs setter rejects invalid values and leaves state unchanged", () => {
+    const hyperparameters = new Hyperparameters();
+    for (const value of NON_POSITIVE_INTEGERS) {
+        assert.throws(() => { hyperparameters.numberEpochs = value; }, RangeError, `accepted ${value}`);
+    }
+    assert.equal(hyperparameters.numberEpochs, 1);
+});
+test("constructor rejects an invalid contextLength", () => {
+    for (const value of NON_POSITIVE_INTEGERS) {
+        assert.throws(() => new Hyperparameters(768, value), RangeError, `accepted ${value}`);
+    }
+});
+test("mode defaults to TRAINING_MODE", () => {
+    assert.equal(new Hyperparameters().mode, Hyperparameters.TRAINING_MODE);
+});
+test("the three modes have distinct values", () => {
+    const modes = [Hyperparameters.TRAINING_MODE, Hyperparameters.VALIDATION_MODE, Hyperparameters.GENERATION_MODE];
+    assert.equal(new Set(modes).size, 3);
+});
+test("mode setter stores each of the three modes", () => {
+    const hyperparameters = new Hyperparameters();
+    for (const mode of [Hyperparameters.VALIDATION_MODE, Hyperparameters.GENERATION_MODE, Hyperparameters.TRAINING_MODE]) {
+        hyperparameters.mode = mode;
+        assert.equal(hyperparameters.mode, mode);
+    }
+});
+test("mode setter rejects values that are not one of the three modes, leaving state unchanged", () => {
+    const hyperparameters = new Hyperparameters();
+    hyperparameters.mode = Hyperparameters.VALIDATION_MODE;
+    for (const value of [-1, 3, 0.5, NaN]) {
+        assert.throws(() => { hyperparameters.mode = value; }, RangeError, `accepted ${value}`);
+    }
+    assert.equal(hyperparameters.mode, Hyperparameters.VALIDATION_MODE);
+});
+test("constructor rejects an invalid mode", () => {
+    assert.throws(() => new Hyperparameters(768, 1024, 0.1, 3), RangeError);
+});
 test("embeddingSize setter stores the value and recomputes weightMatrixColumns", () => {
-    const hyperparameters = new Hyperparameters(768, 1024, 0.1, true, 12);
+    const hyperparameters = new Hyperparameters(768, 1024, 0.1, Hyperparameters.TRAINING_MODE, 12);
     hyperparameters.embeddingSize = 1200;
     assert.equal(hyperparameters.embeddingSize, 1200);
     assert.equal(hyperparameters.weightMatrixColumns, 100);
 });
 test("embeddingSize setter rejects a size not divisible by numberAttentionHeads and leaves state unchanged", () => {
-    const hyperparameters = new Hyperparameters(768, 1024, 0.1, true, 12);
+    const hyperparameters = new Hyperparameters(768, 1024, 0.1, Hyperparameters.TRAINING_MODE, 12);
     assert.throws(() => { hyperparameters.embeddingSize = 770; }, RangeError);
     assert.throws(() => { hyperparameters.embeddingSize = NaN; }, RangeError);
     assert.equal(hyperparameters.embeddingSize, 768);
     assert.equal(hyperparameters.weightMatrixColumns, 64);
 });
 test("numberAttentionHeads setter stores the value and recomputes weightMatrixColumns", () => {
-    const hyperparameters = new Hyperparameters(768, 1024, 0.1, true, 12);
+    const hyperparameters = new Hyperparameters(768, 1024, 0.1, Hyperparameters.TRAINING_MODE, 12);
     hyperparameters.numberAttentionHeads = 8;
     assert.equal(hyperparameters.numberAttentionHeads, 8);
     assert.equal(hyperparameters.weightMatrixColumns, 96);
 });
 test("numberAttentionHeads setter rejects invalid values and leaves state unchanged", () => {
-    const hyperparameters = new Hyperparameters(768, 1024, 0.1, true, 12);
+    const hyperparameters = new Hyperparameters(768, 1024, 0.1, Hyperparameters.TRAINING_MODE, 12);
     for (const value of NON_POSITIVE_INTEGERS) {
         assert.throws(() => { hyperparameters.numberAttentionHeads = value; }, RangeError, `accepted ${value}`);
     }
@@ -125,7 +192,7 @@ test("positionEmbeddingStandardDeviation setter rejects negative, infinite and N
 // The weight initialization standard deviations that default to GPT-2's 0.02.
 const gpt2StandardDeviations = [
     "tokenEmbeddingStandardDeviation",
-    "attentionProjectionStandardDeviation",
+    "linearLayerStandardDeviation",
     "outputLayerStandardDeviation",
 ];
 test("weight initialization standard deviations default to 0.02, as in GPT-2", () => {

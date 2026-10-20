@@ -1,4 +1,6 @@
 import Hyperparameters from "./Hyperparameters.js";
+import { randomNormalMatrix } from "./WeightInitialization.js";
+import Matrix, { vectorTimesMatrix } from "./Matrix.js";
 import DEBUG from "./Debug.js";
 /**
  * Holds the trainable query, key and value weight matrices used by
@@ -15,82 +17,76 @@ class GPTAttention {
     /** Probability, between 0 and 1, that each attention weight is dropped (set to zero) by dropout. */
     dropoutRate;
     /**
-     * True in training mode, when dropout is applied to the attention weights;
-     * false in inference mode, when it is skipped. Read from Hyperparameters on
-     * every access, so changing Hyperparameters.training after construction
-     * takes effect.
+     * The current mode: Hyperparameters.TRAINING_MODE, VALIDATION_MODE or
+     * GENERATION_MODE. Dropout is only applied to the attention weights in
+     * TRAINING_MODE. Read from Hyperparameters on every access, so changing
+     * Hyperparameters.mode after construction takes effect.
      */
-    get training() {
-        return this.isTraining();
+    get mode() {
+        return this.getMode();
     }
-    /** Reads the Hyperparameters' current training flag. */
-    isTraining;
+    /** Reads the Hyperparameters' current mode. */
+    getMode;
     /** The query weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
-    queryWeights = [];
+    queryWeights = new Matrix(0, 0);
     /** The key weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
-    keyWeights = [];
+    keyWeights = new Matrix(0, 0);
     /** The value weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
-    valueWeights = [];
+    valueWeights = new Matrix(0, 0);
     /** True if the query, key and value projections add a bias to their outputs; false if they do not. */
     qkvBias;
     /** Query biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
-    queryBiases = [];
+    queryBiases = new Float32Array(0);
     /** Key biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
-    keyBiases = [];
+    keyBiases = new Float32Array(0);
     /** Value biases built by build(): weightMatrixColumns values. Empty when qkvBias is false. */
-    valueBiases = [];
+    valueBiases = new Float32Array(0);
+    /** Standard deviation of the normal distribution (mean 0) used to initialize the weight matrices. GPT-2 uses 0.02. */
+    standardDeviation;
     /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
     random;
     /**
      * Creates a GPTAttention, copying embeddingSize, weightMatrixColumns,
-     * dropoutRate and qkvBias from the given Hyperparameters so this
-     * instance always matches the values used elsewhere in the application,
-     * then builds the weight matrices and biases.
+     * dropoutRate, qkvBias and linearLayerStandardDeviation from the given
+     * Hyperparameters so this instance always matches the values used
+     * elsewhere in the application, then builds the weight matrices and biases.
      *
-     * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate, training, qkvBias and the random number stream. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate, mode, qkvBias, linearLayerStandardDeviation and the random number stream. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.embeddingSize = hyperparameters.embeddingSize;
         this.weightMatrixColumns = hyperparameters.weightMatrixColumns;
         this.dropoutRate = hyperparameters.dropoutRate;
-        this.isTraining = () => hyperparameters.training;
+        this.getMode = () => hyperparameters.mode;
         this.qkvBias = hyperparameters.qkvBias;
+        this.standardDeviation = hyperparameters.linearLayerStandardDeviation;
         this.random = () => hyperparameters.random();
         this.build();
     }
     /**
      * Builds the queryWeights, keyWeights and valueWeights matrices, each
      * embeddingSize rows by weightMatrixColumns columns, and stores them on the
-     * instance. Weights are initialized the same way as PyTorch's nn.Linear:
-     * drawn uniformly from [-1/sqrt(embeddingSize), 1/sqrt(embeddingSize)).
-     * When qkvBias is true, a bias vector of weightMatrixColumns values is
-     * also built for each projection, drawn from the same range as nn.Linear
-     * does; otherwise the bias arrays are left empty.
+     * instance. Initialized as in GPT-2 (Hugging Face
+     * GPT2PreTrainedModel._init_weights, which initializes GPT-2's combined
+     * query/key/value layer c_attn this way):
+     * - Weights are drawn from a normal distribution with mean 0 and standard
+     *   deviation standardDeviation (0.02 by default).
+     * - When qkvBias is true, each projection has a bias vector of
+     *   weightMatrixColumns values, all 0; otherwise the bias arrays are left
+     *   empty.
      *
      * @returns void. The resulting matrices and biases are stored on the instance.
      */
     build() {
-        /*
-         * PyTorch's nn.Linear uses kaiming_uniform_ with a = sqrt(5), which
-         * works out as a uniform distribution over [-bound, bound) with
-         * bound = 1 / sqrt(fan_in). Here fan_in is the number of inputs to each
-         * output, i.e. embeddingSize. Scaling the range by fan_in keeps the
-         * variance of the projected query, key and value vectors roughly
-         * independent of the embedding size.
-         */
-        const bound = 1 / Math.sqrt(this.embeddingSize);
-        // A fresh embeddingSize x weightMatrixColumns matrix of random values
-        // in [-bound, bound); called once per weight matrix so each gets its own
-        // independent set of random values.
-        const buildMatrix = () => Array.from({ length: this.embeddingSize }, () => Array.from({ length: this.weightMatrixColumns }, () => (this.random() * 2 - 1) * bound));
-        this.queryWeights = buildMatrix();
-        this.keyWeights = buildMatrix();
-        this.valueWeights = buildMatrix();
-        // A fresh bias vector with the same bound as the weights, as in nn.Linear.
-        const buildBiases = () => Array.from({ length: this.weightMatrixColumns }, () => (this.random() * 2 - 1) * bound);
-        this.queryBiases = this.qkvBias ? buildBiases() : [];
-        this.keyBiases = this.qkvBias ? buildBiases() : [];
-        this.valueBiases = this.qkvBias ? buildBiases() : [];
+        // Called once per weight matrix, so each gets its own independent set of random values.
+        this.queryWeights = randomNormalMatrix(this.embeddingSize, this.weightMatrixColumns, this.standardDeviation, this.random);
+        this.keyWeights = randomNormalMatrix(this.embeddingSize, this.weightMatrixColumns, this.standardDeviation, this.random);
+        this.valueWeights = randomNormalMatrix(this.embeddingSize, this.weightMatrixColumns, this.standardDeviation, this.random);
+        // A new Float32Array is filled with zeros, so the biases start at 0.
+        const biasLength = this.qkvBias ? this.weightMatrixColumns : 0;
+        this.queryBiases = new Float32Array(biasLength);
+        this.keyBiases = new Float32Array(biasLength);
+        this.valueBiases = new Float32Array(biasLength);
         if (DEBUG.QKV)
             console.log(`GPTAttention| Weight matrices built. Rows: ${this.embeddingSize}; columns: ${this.weightMatrixColumns}`);
         // console.table lays each matrix out as a proper grid of rows and
@@ -98,11 +94,11 @@ class GPTAttention {
         // comma-separated string that logging a nested array directly produces.
         if (DEBUG.QKV) {
             console.log("GPTAttention| Query weights:");
-            console.table(this.queryWeights);
+            console.table(this.queryWeights.toArrays());
             console.log("GPTAttention| Key weights:");
-            console.table(this.keyWeights);
+            console.table(this.keyWeights.toArrays());
             console.log("GPTAttention| Value weights:");
-            console.table(this.valueWeights);
+            console.table(this.valueWeights.toArrays());
         }
     }
     /**
@@ -113,10 +109,12 @@ class GPTAttention {
      * each tokenCount rows by weightMatrixColumns columns. Each token's query
      * is then multiplied (dot product) by every token's key to give that
      * token's attention scores. These scores are scaled by the square root of
-     * the key dimension and passed through a softmax to give attention weights.
-     * A causal mask then zeroes the weights above the diagonal, and each row
-     * is re-normalized to sum to 1. In training mode dropout is then applied
-     * to give the final attention weights; in inference mode it is skipped.
+     * the key dimension, and a causal mask sets the scores above the diagonal
+     * (tokens later in the sequence) to -Infinity. A softmax across each row
+     * then gives attention weights in which the masked tokens are 0 and each
+     * row sums to 1. In training mode dropout is then applied
+     * to give the final attention weights; in validation and generation modes
+     * it is skipped.
      * Finally, each token's context vector is the sum of every token's value
      * vector multiplied by the corresponding final attention weight. The
      * intermediate matrices are logged but not returned.
@@ -127,24 +125,21 @@ class GPTAttention {
     calculate(embeddings) {
         if (DEBUG.ATTENTION)
             console.log(`GPTAttention| Calculating queries, keys and values for ${embeddings.length} tokens.`);
-        /*
-         * Multiplies a single embedding vector by a weight matrix and adds a
-         * bias: each column of the result is the dot product of the vector with
-         * that column of the matrix, plus that column's bias when qkvBias is
-         * true. A 1 x embeddingSize vector times an embeddingSize x
-         * weightMatrixColumns matrix produces a 1 x weightMatrixColumns vector.
-         */
-        const multiplyVectorByMatrix = (vector, matrix, biases) => Array.from({ length: this.weightMatrixColumns }, (_, column) => vector.reduce((sum, value, row) => sum + value * matrix[row][column], this.qkvBias ? biases[column] : 0));
         const queries = [];
         const keys = [];
         const values = [];
-        // For each token in turn, project its embedding vector into its query,
-        // key and value vectors using the three weight matrices.
+        /*
+         * For each token in turn, project its embedding vector into its query,
+         * key and value vectors by multiplying it by the three weight matrices
+         * and adding the biases (which are empty when qkvBias is false). A
+         * 1 x embeddingSize vector times an embeddingSize x weightMatrixColumns
+         * matrix produces a 1 x weightMatrixColumns vector.
+         */
         for (let i = 0; i < embeddings.length; i++) {
             const embedding = embeddings[i];
-            const query = multiplyVectorByMatrix(embedding, this.queryWeights, this.queryBiases);
-            const key = multiplyVectorByMatrix(embedding, this.keyWeights, this.keyBiases);
-            const value = multiplyVectorByMatrix(embedding, this.valueWeights, this.valueBiases);
+            const query = vectorTimesMatrix(embedding, this.queryWeights, this.queryBiases);
+            const key = vectorTimesMatrix(embedding, this.keyWeights, this.keyBiases);
+            const value = vectorTimesMatrix(embedding, this.valueWeights, this.valueBiases);
             queries.push(query);
             keys.push(key);
             values.push(value);
@@ -160,85 +155,89 @@ class GPTAttention {
             console.log("GPTAttention| Values (one row per token):");
             console.table(values);
         }
+        const tokenCount = embeddings.length;
         /*
          * For each token, take the dot product of its query vector with the key
          * vector of every token in the sequence (including itself). The result
          * is a tokenCount x tokenCount matrix in which row i holds the attention
          * scores of token i, i.e. how strongly token i's query matches each
-         * token's key.
+         * token's key:
+         *
+         *     score[i][j] = sum over d of query[i][d] * key[j][d]
          */
-        const attentionScores = queries.map((query) => keys.map((key) => query.reduce((sum, value, index) => sum + value * key[index], 0)));
+        const attentionScores = [];
+        for (let i = 0; i < tokenCount; i++) {
+            attentionScores.push([]);
+            for (let j = 0; j < tokenCount; j++) {
+                let dotProduct = 0;
+                for (let d = 0; d < this.weightMatrixColumns; d++) {
+                    dotProduct += queries[i][d] * keys[j][d];
+                }
+                attentionScores[i].push(dotProduct);
+            }
+        }
         if (DEBUG.ATTENTION) {
             console.log("GPTAttention| Attention scores (row = query token, column = key token):");
             console.table(attentionScores);
         }
         /*
          * Scale each token's attention scores by dividing them by the square
-         * root of the key dimension (weightMatrixColumns), then apply a softmax
-         * across each row. Scaling stops the dot products growing with the key
-         * dimension, which would otherwise push the softmax towards a one-hot
-         * output with tiny gradients. The softmax turns each row into attention
-         * weights that are all positive and sum to 1. The row's maximum is
-         * subtracted before exponentiating to avoid overflow; this does not
-         * change the result because softmax is unaffected by adding a constant
-         * to every input.
+         * root of the key dimension (weightMatrixColumns). Scaling stops the dot
+         * products growing with the key dimension, which would otherwise push
+         * the softmax towards a one-hot output with tiny gradients.
+         *
+         * At the same time apply the causal mask: the score of every token that
+         * comes after token i in the sequence (column > row, above the diagonal)
+         * is replaced with -Infinity, so token i can only attend to tokens 0..i.
+         * Masking before the softmax, as the book does, means the masked tokens
+         * take no part in the softmax at all, so no re-normalization is needed
+         * afterwards.
          */
         const scale = Math.sqrt(this.weightMatrixColumns);
-        const attentionWeights = attentionScores.map((row) => {
-            const scaled = row.map((score) => score / scale);
-            const max = Math.max(...scaled);
-            const exponentials = scaled.map((score) => Math.exp(score - max));
+        const maskedScores = [];
+        for (let i = 0; i < tokenCount; i++) {
+            maskedScores.push([]);
+            for (let j = 0; j < tokenCount; j++) {
+                // Token i may attend to token j only if j is not after i.
+                maskedScores[i].push(j <= i ? attentionScores[i][j] / scale : -Infinity);
+            }
+        }
+        if (DEBUG.ATTENTION) {
+            console.log("GPTAttention| Scaled and causally masked attention scores (-Infinity = masked):");
+            console.table(maskedScores);
+        }
+        /*
+         * Apply a softmax across each row to turn the masked scores into
+         * attention weights that are all positive and sum to 1. Because
+         * exp(-Infinity) is 0, the masked tokens get a weight of exactly 0.
+         *
+         * The row's maximum is subtracted before exponentiating to avoid
+         * overflow; this does not change the result because softmax is
+         * unaffected by adding a constant to every input. The maximum is taken
+         * after masking, so it always comes from a visible token. The visible
+         * token with that maximum therefore has exp(0) = 1, which means the row
+         * total is at least 1 and can never underflow to 0. (Taking the maximum
+         * before masking could make every visible exponential underflow to 0 if
+         * a future token's score was much larger, giving a NaN row.) The diagonal
+         * is never masked, so every row has at least one finite score.
+         */
+        const attentionWeights = maskedScores.map((row) => {
+            const max = Math.max(...row);
+            const exponentials = row.map((score) => Math.exp(score - max));
             const total = exponentials.reduce((sum, value) => sum + value, 0);
             return exponentials.map((value) => value / total);
         });
         if (DEBUG.ATTENTION) {
-            console.log("GPTAttention| Attention weights (scaled and softmaxed; each row sums to 1):");
+            console.log("GPTAttention| Attention weights (masked softmax; values above the diagonal are 0, each row sums to 1):");
             console.table(attentionWeights);
         }
         /*
-         * Build a causal attention mask with the same tokenCount x tokenCount
-         * dimensions as the attention weight matrix. Entries on or below the
-         * diagonal are 1 and entries above it are 0, so row i only keeps tokens
-         * 0..i and hides any token that comes after token i in the sequence.
-         */
-        const causalMask = attentionWeights.map((row, rowIndex) => row.map((_, columnIndex) => (columnIndex <= rowIndex ? 1 : 0)));
-        if (DEBUG.ATTENTION) {
-            console.log("GPTAttention| Causal attention mask (1 = visible, 0 = masked):");
-            console.table(causalMask);
-        }
-        /*
-         * Multiply the attention weights element by element with the causal
-         * mask. Weights on or below the diagonal are kept (multiplied by 1) and
-         * weights above the diagonal are zeroed (multiplied by 0), so each token
-         * no longer attends to tokens that come after it.
-         */
-        const maskedAttentionWeights = attentionWeights.map((row, rowIndex) => row.map((weight, columnIndex) => weight * causalMask[rowIndex][columnIndex]));
-        if (DEBUG.ATTENTION) {
-            console.log("GPTAttention| Masked attention weights (values above the diagonal zeroed):");
-            console.table(maskedAttentionWeights);
-        }
-        /*
-         * Re-normalize the masked attention weights by dividing every element
-         * in a row by that row's sum, so each row sums to 1 again. Masking
-         * removed the weights above the diagonal, leaving rows that sum to less
-         * than 1. A row sum can never be zero because the diagonal is always
-         * kept and every softmax output is positive.
-         */
-        const normalizedMaskedAttentionWeights = maskedAttentionWeights.map((row) => {
-            const rowSum = row.reduce((sum, weight) => sum + weight, 0);
-            return row.map((weight) => weight / rowSum);
-        });
-        if (DEBUG.ATTENTION) {
-            console.log("GPTAttention| Re-normalized masked attention weights (each row sums to 1):");
-            console.table(normalizedMaskedAttentionWeights);
-        }
-        /*
-         * Dropout is only applied in training mode. In inference mode the
-         * re-normalized masked attention weights are used unchanged as the
+         * Dropout is only applied in training mode. In validation and
+         * generation modes the attention weights are used unchanged as the
          * final attention weights, so the output is deterministic.
          */
         let finalAttentionWeights;
-        if (this.training) {
+        if (this.mode === Hyperparameters.TRAINING_MODE) {
             /*
              * Build a dropout mask with the same tokenCount x tokenCount
              * dimensions as the attention weights. Each entry is independently
@@ -246,27 +245,33 @@ class GPTAttention {
              * proportion of the mask is zero. The remaining entries are set to
              * 1 / (1 - dropoutRate) so that, once the mask is applied, the
              * expected value of each attention weight is unchanged. With the
-             * default dropoutRate of 0.5 the kept entries are 2.
+             * default dropoutRate of 0.1 the kept entries are 1 / 0.9, about 1.11.
              */
             const keepScale = 1 / (1 - this.dropoutRate);
-            const dropoutMask = normalizedMaskedAttentionWeights.map((row) => row.map(() => (this.random() < this.dropoutRate ? 0 : keepScale)));
+            const dropoutMask = attentionWeights.map((row) => row.map(() => (this.random() < this.dropoutRate ? 0 : keepScale)));
             if (DEBUG.ATTENTION) {
                 console.log(`GPTAttention| Dropout mask (dropout rate ${this.dropoutRate}; kept values = ${keepScale}):`);
                 console.table(dropoutMask);
             }
             /*
-             * Apply dropout by multiplying the re-normalized masked attention
-             * weights element by element with the dropout mask. Dropped weights
-             * become 0 and kept weights are scaled by 1 / (1 - dropoutRate).
+             * Apply dropout by multiplying the attention weights element by
+             * element with the dropout mask. Dropped weights become 0 and kept
+             * weights are scaled by 1 / (1 - dropoutRate).
              */
-            finalAttentionWeights = normalizedMaskedAttentionWeights.map((row, rowIndex) => row.map((weight, columnIndex) => weight * dropoutMask[rowIndex][columnIndex]));
+            finalAttentionWeights = [];
+            for (let i = 0; i < tokenCount; i++) {
+                finalAttentionWeights.push([]);
+                for (let j = 0; j < tokenCount; j++) {
+                    finalAttentionWeights[i].push(attentionWeights[i][j] * dropoutMask[i][j]);
+                }
+            }
             if (DEBUG.ATTENTION)
                 console.log("GPTAttention| Final attention weights (after causal mask and dropout):");
         }
         else {
-            finalAttentionWeights = normalizedMaskedAttentionWeights;
+            finalAttentionWeights = attentionWeights;
             if (DEBUG.ATTENTION)
-                console.log("GPTAttention| Inference mode: dropout skipped. Final attention weights (after causal mask):");
+                console.log("GPTAttention| Validation or generation mode: dropout skipped. Final attention weights (after causal mask):");
         }
         if (DEBUG.ATTENTION)
             console.table(finalAttentionWeights);
@@ -278,9 +283,21 @@ class GPTAttention {
          * that token and the tokens before it, in which the tokens it attends to
          * most contribute most. Later tokens and dropped weights are zero, so
          * they do not contribute. Collecting these gives a tokenCount x
-         * weightMatrixColumns matrix.
+         * weightMatrixColumns matrix:
+         *
+         *     context[i][d] = sum over j of weight[i][j] * value[j][d]
          */
-        const contextVectors = finalAttentionWeights.map((weights) => Array.from({ length: this.weightMatrixColumns }, (_, column) => weights.reduce((sum, weight, token) => sum + weight * values[token][column], 0)));
+        const contextVectors = [];
+        for (let i = 0; i < tokenCount; i++) {
+            contextVectors.push([]);
+            for (let d = 0; d < this.weightMatrixColumns; d++) {
+                let sum = 0;
+                for (let j = 0; j < tokenCount; j++) {
+                    sum += finalAttentionWeights[i][j] * values[j][d];
+                }
+                contextVectors[i].push(sum);
+            }
+        }
         if (DEBUG.CONTEXT) {
             console.log("GPTAttention| Context vectors (one row per token):");
             console.table(contextVectors);
@@ -295,8 +312,7 @@ class GPTAttention {
      * @returns The total number of weights and biases currently stored on the instance.
      */
     getParameterCount() {
-        const countMatrix = (matrix) => matrix.reduce((sum, row) => sum + row.length, 0);
-        return (countMatrix(this.queryWeights) + countMatrix(this.keyWeights) + countMatrix(this.valueWeights) +
+        return (this.queryWeights.size + this.keyWeights.size + this.valueWeights.size +
             this.queryBiases.length + this.keyBiases.length + this.valueBiases.length);
     }
 }

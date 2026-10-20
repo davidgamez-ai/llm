@@ -1,5 +1,7 @@
 import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
+import { randomNormalMatrix } from "./WeightInitialization.js";
+import Matrix from "./Matrix.js";
 import DEBUG from "./Debug.js";
 /**
  * Two embedding matrices, each mapping an id (a token id, or a sequence
@@ -18,8 +20,9 @@ class Embedding {
     embeddingSize;
     /**
      * Standard deviation of the normal distribution (mean 0) used to
-     * initialize the position embedding matrix. GPT-2's original
-     * implementation uses 0.01 for its position embeddings (wpe).
+     * initialize the position embedding matrix. OpenAI's original GPT-2
+     * TensorFlow code uses 0.01 for its position embeddings (wpe); Hugging
+     * Face's implementation uses 0.02.
      */
     positionEmbeddingStandardDeviation;
     /**
@@ -30,11 +33,11 @@ class Embedding {
     tokenEmbeddingStandardDeviation;
     // The token embedding matrix built by build(): one row per vocabulary
     // token, each row embeddingSize values wide. Looked up by token id.
-    textEmbeddingMatrix = [];
+    textEmbeddingMatrix = new Matrix(0, 0);
     // The position embedding matrix built by build(): one row per position in
     // the context window (contextLength rows), each row embeddingSize values
     // wide. Looked up by a token's position in the sequence rather than by its id.
-    positionEmbeddingMatrix = [];
+    positionEmbeddingMatrix = new Matrix(0, 0);
     /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
     random;
     /**
@@ -57,12 +60,15 @@ class Embedding {
      * Builds the two embedding matrices, stores them on the instance, and logs
      * their dimensions:
      * - textEmbeddingMatrix: vocabSize x embeddingSize, initialized as in
-     *   GPT-2 (Hugging Face GPT2Model._init_weights), with values drawn from a
+     *   GPT-2 (Hugging Face GPT2PreTrainedModel._init_weights), with values drawn from a
      *   normal distribution with mean 0 and standard deviation
      *   tokenEmbeddingStandardDeviation (0.02 by default).
      * - positionEmbeddingMatrix: contextLength x embeddingSize, initialized as
-     *   in GPT-2, with values drawn from a normal distribution with mean 0 and
-     *   standard deviation positionEmbeddingStandardDeviation (0.01 by default).
+     *   in OpenAI's original GPT-2 TensorFlow code (model.py, wpe), with values
+     *   drawn from a normal distribution with mean 0 and standard deviation
+     *   positionEmbeddingStandardDeviation (0.01 by default). Hugging Face's
+     *   GPT2PreTrainedModel._init_weights uses 0.02 for the position embeddings instead,
+     *   the same as for the token embeddings.
      *
      * Random values come from the Hyperparameters' shared stream, so the
      * matrices are reproducible when Hyperparameters.seed is set.
@@ -70,23 +76,11 @@ class Embedding {
      * @returns void. The resulting matrices are stored on the instance for use by getEmbedding.
      */
     build() {
-        const random = this.random;
-        /*
-         * Draws one sample from a normal distribution with mean 0 and the given
-         * standard deviation, using the Box-Muller transform to turn two uniform
-         * samples into a standard normal sample. 1 - random() lies in (0, 1], so
-         * Math.log never receives 0.
-         */
-        const randomNormal = (standardDeviation) => {
-            const u1 = 1 - random();
-            const u2 = random();
-            return standardDeviation * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
-        };
-        this.textEmbeddingMatrix = Array.from({ length: this.vocabSize }, () => Array.from({ length: this.embeddingSize }, () => randomNormal(this.tokenEmbeddingStandardDeviation)));
-        this.positionEmbeddingMatrix = Array.from({ length: this.contextLength }, () => Array.from({ length: this.embeddingSize }, () => randomNormal(this.positionEmbeddingStandardDeviation)));
+        this.textEmbeddingMatrix = randomNormalMatrix(this.vocabSize, this.embeddingSize, this.tokenEmbeddingStandardDeviation, this.random);
+        this.positionEmbeddingMatrix = randomNormalMatrix(this.contextLength, this.embeddingSize, this.positionEmbeddingStandardDeviation, this.random);
         if (DEBUG.EMBEDDING) {
-            console.log(`Embeddings| Token embedding matrix built. Rows: ${this.textEmbeddingMatrix.length}; columns: ${this.textEmbeddingMatrix[0].length}`);
-            console.log(`Embeddings| Position embedding matrix built. Rows: ${this.positionEmbeddingMatrix.length}; columns: ${this.positionEmbeddingMatrix[0].length}`);
+            console.log(`Embeddings| Token embedding matrix built. Rows: ${this.textEmbeddingMatrix.rows}; columns: ${this.textEmbeddingMatrix.columns}`);
+            console.log(`Embeddings| Position embedding matrix built. Rows: ${this.positionEmbeddingMatrix.rows}; columns: ${this.positionEmbeddingMatrix.columns}`);
         }
     }
     /**
@@ -110,22 +104,36 @@ class Embedding {
      * @param tokenIds - Token ids of already tokenized text, in sequence order.
      * @returns One combined embedding vector per token, in token order. Each vector is the token's textEmbeddingMatrix row plus its positionEmbeddingMatrix row.
      * @throws Error if there are more tokens than contextLength, since the position embedding matrix has no row for positions beyond the context window.
+     * @throws RangeError if any token id is not a whole number from 0 to vocabSize - 1, since the token embedding matrix has no row for it.
      */
     getEmbeddingFromTokens(tokenIds) {
         if (tokenIds.length > this.contextLength) {
             throw new Error(`Embedding| Sequence of ${tokenIds.length} tokens exceeds the context length of ${this.contextLength}`);
         }
+        /*
+         * Check every id before looking any up. An id outside the vocabulary
+         * (or a fraction or NaN) has no row in textEmbeddingMatrix, so the
+         * lookup would return undefined and fail later with a confusing
+         * TypeError, far from the cause.
+         */
+        for (let position = 0; position < tokenIds.length; position++) {
+            const id = tokenIds[position];
+            if (!(Number.isInteger(id) && id >= 0 && id < this.vocabSize)) {
+                throw new RangeError(`Embedding| Token id ${id} at position ${position} is outside the vocabulary (0 to ${this.vocabSize - 1})`);
+            }
+        }
+        // The token and position embedding rows are views onto the matrices, not copies.
         const tokenEmbeddings = [];
         const positionEmbeddings = [];
         const combinedEmbeddings = [];
         for (let position = 0; position < tokenIds.length; position++) {
             // Look up the current token's row in the text embedding matrix, by id.
             const id = tokenIds[position];
-            const tokenEmbedding = this.textEmbeddingMatrix[id];
+            const tokenEmbedding = this.textEmbeddingMatrix.getRow(id);
             tokenEmbeddings.push(tokenEmbedding);
             // Look up this token's row in the position embedding matrix, by its
             // position in the sequence rather than by its id.
-            const positionEmbedding = this.positionEmbeddingMatrix[position];
+            const positionEmbedding = this.positionEmbeddingMatrix.getRow(position);
             positionEmbeddings.push(positionEmbedding);
             // Combine the token embedding and position embedding element-wise so
             // the returned vector encodes both the token's identity and its
@@ -154,9 +162,7 @@ class Embedding {
      * @returns The total number of values currently stored in textEmbeddingMatrix and positionEmbeddingMatrix.
      */
     getParameterCount() {
-        const countMatrix = (matrix) => matrix.reduce((sum, row) => sum + row.length, 0);
-        return countMatrix(this.textEmbeddingMatrix)
-            + countMatrix(this.positionEmbeddingMatrix);
+        return this.textEmbeddingMatrix.size + this.positionEmbeddingMatrix.size;
     }
     /**
      * Logs a one or two dimensional array. When DEBUG.VERBOSE is true the
@@ -164,14 +170,16 @@ class Embedding {
      * dimensions are printed, which keeps the output short for large arrays.
      *
      * @param label - Name of the array, printed before its contents or dimensions.
-     * @param array - The array to log: a vector, or a matrix with one row per token.
+     * @param array - The array to log: a vector, or one row per token. Rows may be Float32Arrays (rows of a Matrix).
      */
     logArray(label, array) {
+        const isTwoDimensional = typeof array[0] === "object";
         if (DEBUG.VERBOSE) {
             console.log(`Embedding| ${label}:`);
-            console.table(array);
+            // Convert Float32Array rows to plain arrays so console.table lays them out as a grid.
+            console.table(isTwoDimensional ? array.map((row) => Array.from(row)) : array);
         }
-        else if (Array.isArray(array[0])) {
+        else if (isTwoDimensional) {
             console.log(`Embedding| ${label}. Rows: ${array.length}; columns: ${array[0].length}`);
         }
         else {

@@ -13,12 +13,28 @@ import createSeededRandom from "./SeededRandom.js";
  * before those components are created.
  */
 class Hyperparameters {
+    /**
+     * Mode for training the model: dropout is applied, and the model returns
+     * logits for every token so the loss can be calculated at every position.
+     */
+    static TRAINING_MODE = 0;
+    /**
+     * Mode for measuring the loss on held-out data: dropout is skipped, so the
+     * results are deterministic, but the model still returns logits for every
+     * token so the loss can be calculated at every position.
+     */
+    static VALIDATION_MODE = 1;
+    /**
+     * Mode for generating text: dropout is skipped, and the model only returns
+     * logits for the last token, since only the next token is being predicted.
+     */
+    static GENERATION_MODE = 2;
     _embeddingSize;
     _contextLength;
     _vocabularySize;
     _weightMatrixColumns;
     _dropoutRate;
-    _training;
+    _mode;
     _numberAttentionHeads;
     _numberTransformerBlocks;
     _batchSize;
@@ -26,9 +42,11 @@ class Hyperparameters {
     _feedForwardBias;
     _positionEmbeddingStandardDeviation;
     _tokenEmbeddingStandardDeviation;
-    _attentionProjectionStandardDeviation;
+    _linearLayerStandardDeviation;
     _outputLayerStandardDeviation;
     _outputLength;
+    _trainingRatio;
+    _numberEpochs;
     _seed;
     /**
      * The random number stream shared by every component built from this
@@ -42,11 +60,16 @@ class Hyperparameters {
      *
      * @param embeddingSize - The size of each token embedding vector.
      * @param contextLength - The number of tokens of context the model
-     * operates over at once.
+     * operates over at once. Defaults to 12 to keep runs fast; GPT-2 uses
+     * 1024. The position embedding matrix has contextLength rows, so this
+     * also changes the parameter count: with the other defaults the model has
+     * 163,009,536 parameters (matching the book) only when contextLength is
+     * 1024, and 162,232,320 with the default of 12. Must be a positive whole
+     * number.
      * @param dropoutRate - The probability, between 0 and 1 inclusive, that
      * any given value is dropped (set to zero) during dropout.
-     * @param training - True for training mode, in which dropout is applied;
-     * false for inference mode, in which dropout is skipped.
+     * @param mode - What the model is being used for: TRAINING_MODE,
+     * VALIDATION_MODE or GENERATION_MODE. Defaults to TRAINING_MODE.
      * @param numberAttentionHeads - The number of attention heads used in
      * multi-head attention. Must be a positive whole number that divides
      * embeddingSize exactly.
@@ -68,52 +91,71 @@ class Hyperparameters {
      * normal distribution (mean 0) used to initialize the token embedding
      * matrix. Defaults to 0.02, as in GPT-2. Must be a finite number greater
      * than or equal to 0.
-     * @param attentionProjectionStandardDeviation - The base standard deviation
-     * of the normal distribution (mean 0) used to initialize the multi-head
-     * attention output projection, before it is divided by
-     * sqrt(2 * numberTransformerBlocks). Defaults to 0.02, as in GPT-2. Must be
-     * a finite number greater than or equal to 0.
+     * @param linearLayerStandardDeviation - The standard deviation of the
+     * normal distribution (mean 0) used to initialize the weights of every
+     * linear layer in the transformer blocks: the query, key and value
+     * weights, the attention output projection and both feed forward layers.
+     * The two residual projections (the attention output projection and the
+     * second feed forward layer) divide it by sqrt(2 * numberTransformerBlocks).
+     * Defaults to 0.02, GPT-2's initializer_range. Must be a finite number
+     * greater than or equal to 0.
      * @param outputLayerStandardDeviation - The standard deviation of the
      * normal distribution (mean 0) used to initialize the linear output
      * layer's weight matrix. Defaults to 0.02, as in GPT-2. Must be a finite
      * number greater than or equal to 0.
      * @param outputLength - The number of tokens the model should generate.
      * Defaults to 2. Must be a positive whole number.
+     * @param trainingRatio - The proportion of the loaded text used for
+     * training; the rest is held back for validation. Defaults to 0.9, as in
+     * the book. Must be greater than 0 and less than 1, so that neither set
+     * is empty.
+     * @param numberEpochs - The number of times training passes over the whole
+     * training set. Defaults to 1. The book uses 10, but until the weights are
+     * updated every epoch gives the same loss, so further epochs only take
+     * time. Must be a positive whole number.
      * @param seed - Optional PRNG seed for the random number stream returned
      * by random(), which every component uses for weight initialization,
      * dropout and decoding. When provided, the same seed always produces the
      * same results, provided components are created and called in the same
      * order. When omitted, Math.random() is used and results differ on every
      * run.
+     * @throws RangeError if contextLength is not a positive whole number.
      * @throws RangeError if dropoutRate is less than 0, greater than 1 or NaN.
+     * @throws RangeError if mode is not TRAINING_MODE, VALIDATION_MODE or GENERATION_MODE.
      * @throws RangeError if numberAttentionHeads is not a positive whole number.
      * @throws RangeError if embeddingSize divided by numberAttentionHeads is
      * not a whole number.
      * @throws RangeError if numberTransformerBlocks is not a positive whole number.
      * @throws RangeError if batchSize is not a positive whole number.
      * @throws RangeError if positionEmbeddingStandardDeviation,
-     * tokenEmbeddingStandardDeviation, attentionProjectionStandardDeviation or
+     * tokenEmbeddingStandardDeviation, linearLayerStandardDeviation or
      * outputLayerStandardDeviation is negative, infinite or NaN.
      * @throws RangeError if outputLength is not a positive whole number.
+     * @throws RangeError if trainingRatio is not greater than 0 and less than 1.
+     * @throws RangeError if numberEpochs is not a positive whole number.
      */
     constructor(embeddingSize = 768, contextLength = 12, //GPT-2 uses 1024
-    dropoutRate = 0.1, training = true, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = false, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, attentionProjectionStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, seed) {
+    dropoutRate = 0.1, mode = Hyperparameters.TRAINING_MODE, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = false, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, linearLayerStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, trainingRatio = 0.9, numberEpochs = 1, seed) {
+        Hyperparameters.validatePositiveInteger("contextLength", contextLength);
         Hyperparameters.validateDropoutRate(dropoutRate);
+        Hyperparameters.validateMode(mode);
         Hyperparameters.validatePositiveInteger("numberAttentionHeads", numberAttentionHeads);
         const weightMatrixColumns = Hyperparameters.computeWeightMatrixColumns(embeddingSize, numberAttentionHeads);
         Hyperparameters.validatePositiveInteger("numberTransformerBlocks", numberTransformerBlocks);
         Hyperparameters.validatePositiveInteger("batchSize", batchSize);
         Hyperparameters.validateStandardDeviation("positionEmbeddingStandardDeviation", positionEmbeddingStandardDeviation);
         Hyperparameters.validateStandardDeviation("tokenEmbeddingStandardDeviation", tokenEmbeddingStandardDeviation);
-        Hyperparameters.validateStandardDeviation("attentionProjectionStandardDeviation", attentionProjectionStandardDeviation);
+        Hyperparameters.validateStandardDeviation("linearLayerStandardDeviation", linearLayerStandardDeviation);
         Hyperparameters.validateStandardDeviation("outputLayerStandardDeviation", outputLayerStandardDeviation);
         Hyperparameters.validatePositiveInteger("outputLength", outputLength);
+        Hyperparameters.validateTrainingRatio(trainingRatio);
+        Hyperparameters.validatePositiveInteger("numberEpochs", numberEpochs);
         this._embeddingSize = embeddingSize;
         this._contextLength = contextLength;
         this._vocabularySize = new BPETokenizer().vocabularySize;
         this._weightMatrixColumns = weightMatrixColumns;
         this._dropoutRate = dropoutRate;
-        this._training = training;
+        this._mode = mode;
         this._numberAttentionHeads = numberAttentionHeads;
         this._numberTransformerBlocks = numberTransformerBlocks;
         this._batchSize = batchSize;
@@ -121,9 +163,11 @@ class Hyperparameters {
         this._feedForwardBias = feedForwardBias;
         this._positionEmbeddingStandardDeviation = positionEmbeddingStandardDeviation;
         this._tokenEmbeddingStandardDeviation = tokenEmbeddingStandardDeviation;
-        this._attentionProjectionStandardDeviation = attentionProjectionStandardDeviation;
+        this._linearLayerStandardDeviation = linearLayerStandardDeviation;
         this._outputLayerStandardDeviation = outputLayerStandardDeviation;
         this._outputLength = outputLength;
+        this._trainingRatio = trainingRatio;
+        this._numberEpochs = numberEpochs;
         this._seed = seed;
         this._random = Hyperparameters.createRandom(seed);
     }
@@ -147,6 +191,37 @@ class Hyperparameters {
         // comparison, is rejected along with values outside [0, 1].
         if (!(dropoutRate >= 0 && dropoutRate <= 1)) {
             throw new RangeError(`Hyperparameters| dropoutRate must be between 0 and 1; got ${dropoutRate}`);
+        }
+    }
+    /**
+     * Checks that a mode is one of the three defined modes.
+     *
+     * @param mode - The mode to check.
+     * @throws RangeError if mode is not TRAINING_MODE, VALIDATION_MODE or GENERATION_MODE.
+     */
+    static validateMode(mode) {
+        const modes = [
+            Hyperparameters.TRAINING_MODE,
+            Hyperparameters.VALIDATION_MODE,
+            Hyperparameters.GENERATION_MODE,
+        ];
+        if (!modes.includes(mode)) {
+            throw new RangeError(`Hyperparameters| mode must be TRAINING_MODE (${Hyperparameters.TRAINING_MODE}), ` +
+                `VALIDATION_MODE (${Hyperparameters.VALIDATION_MODE}) or ` +
+                `GENERATION_MODE (${Hyperparameters.GENERATION_MODE}); got ${mode}`);
+        }
+    }
+    /**
+     * Checks that a training ratio leaves something in both the training and
+     * the validation set.
+     *
+     * @param trainingRatio - The training ratio to check.
+     * @throws RangeError if trainingRatio is not greater than 0 and less than 1, or is NaN.
+     */
+    static validateTrainingRatio(trainingRatio) {
+        // Written as a negated range check so that NaN, which fails every comparison, is rejected.
+        if (!(trainingRatio > 0 && trainingRatio < 1)) {
+            throw new RangeError(`Hyperparameters| trainingRatio must be greater than 0 and less than 1; got ${trainingRatio}`);
         }
     }
     /**
@@ -218,7 +293,9 @@ class Hyperparameters {
     get contextLength() {
         return this._contextLength;
     }
+    /** @throws RangeError if contextLength is not a positive whole number. */
     set contextLength(contextLength) {
+        Hyperparameters.validatePositiveInteger("contextLength", contextLength);
         this._contextLength = contextLength;
     }
     /**
@@ -243,14 +320,19 @@ class Hyperparameters {
         this._dropoutRate = dropoutRate;
     }
     /**
-     * True for training mode, in which dropout is applied; false for
-     * inference mode, in which dropout is skipped.
+     * What the model is being used for: TRAINING_MODE (dropout applied,
+     * logits for every token), VALIDATION_MODE (no dropout, logits for every
+     * token) or GENERATION_MODE (no dropout, logits for the last token only).
+     * Components read this on every use, so changing it after they are built
+     * takes effect immediately.
      */
-    get training() {
-        return this._training;
+    get mode() {
+        return this._mode;
     }
-    set training(training) {
-        this._training = training;
+    /** @throws RangeError if mode is not TRAINING_MODE, VALIDATION_MODE or GENERATION_MODE. */
+    set mode(mode) {
+        Hyperparameters.validateMode(mode);
+        this._mode = mode;
     }
     /** The number of attention heads used in multi-head attention. */
     get numberAttentionHeads() {
@@ -331,18 +413,20 @@ class Hyperparameters {
         this._tokenEmbeddingStandardDeviation = tokenEmbeddingStandardDeviation;
     }
     /**
-     * The base standard deviation of the normal distribution (mean 0) used to
-     * initialize the multi-head attention output projection. GPT-2 uses 0.02.
-     * MultiHeadAttention divides it by sqrt(2 * numberTransformerBlocks) to
-     * stop the residual stream's variance growing with the model's depth.
+     * The standard deviation of the normal distribution (mean 0) used to
+     * initialize the weights of every linear layer in the transformer blocks.
+     * GPT-2 uses 0.02. The two residual projections (MultiHeadAttention's
+     * output projection and FeedForward's second layer) divide it by
+     * sqrt(2 * numberTransformerBlocks) to stop the residual stream's variance
+     * growing with the model's depth.
      */
-    get attentionProjectionStandardDeviation() {
-        return this._attentionProjectionStandardDeviation;
+    get linearLayerStandardDeviation() {
+        return this._linearLayerStandardDeviation;
     }
-    /** @throws RangeError if attentionProjectionStandardDeviation is negative, infinite or NaN. */
-    set attentionProjectionStandardDeviation(attentionProjectionStandardDeviation) {
-        Hyperparameters.validateStandardDeviation("attentionProjectionStandardDeviation", attentionProjectionStandardDeviation);
-        this._attentionProjectionStandardDeviation = attentionProjectionStandardDeviation;
+    /** @throws RangeError if linearLayerStandardDeviation is negative, infinite or NaN. */
+    set linearLayerStandardDeviation(linearLayerStandardDeviation) {
+        Hyperparameters.validateStandardDeviation("linearLayerStandardDeviation", linearLayerStandardDeviation);
+        this._linearLayerStandardDeviation = linearLayerStandardDeviation;
     }
     /**
      * The standard deviation of the normal distribution (mean 0) used to
@@ -364,6 +448,27 @@ class Hyperparameters {
     set outputLength(outputLength) {
         Hyperparameters.validatePositiveInteger("outputLength", outputLength);
         this._outputLength = outputLength;
+    }
+    /**
+     * The proportion of the loaded text used for training; the rest is held
+     * back for validation.
+     */
+    get trainingRatio() {
+        return this._trainingRatio;
+    }
+    /** @throws RangeError if trainingRatio is not greater than 0 and less than 1. */
+    set trainingRatio(trainingRatio) {
+        Hyperparameters.validateTrainingRatio(trainingRatio);
+        this._trainingRatio = trainingRatio;
+    }
+    /** The number of times training passes over the whole training set. */
+    get numberEpochs() {
+        return this._numberEpochs;
+    }
+    /** @throws RangeError if numberEpochs is not a positive whole number. */
+    set numberEpochs(numberEpochs) {
+        Hyperparameters.validatePositiveInteger("numberEpochs", numberEpochs);
+        this._numberEpochs = numberEpochs;
     }
     /**
      * Optional PRNG seed for the random number stream returned by random().
