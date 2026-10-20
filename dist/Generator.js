@@ -1,5 +1,6 @@
 import BPETokenizer from "./BPETokenizer.js";
 import Decoder from "./Decoder.js";
+import { softmax } from "./Loss.js";
 /**
  * Generates text with a GPTModel. The prompt is encoded into token ids once.
  * Then, until outputLength tokens have been generated, the ids are fed into
@@ -75,7 +76,7 @@ class Generator {
              * only returns that row, but taking the last row would also work if it
              * returned logits for every token.
              */
-            const probabilities = Generator.softmax(logits[logits.length - 1]);
+            const probabilities = softmax(logits[logits.length - 1]);
             generatedIds.push(this.decoder.greedy(probabilities));
         }
         /*
@@ -86,25 +87,6 @@ class Generator {
          * was given.
          */
         return text + this.tokenizer.decode(generatedIds);
-    }
-    /**
-     * Converts a row of logits into a probability distribution over the
-     * vocabulary: every value positive and the row summing to 1.
-     *
-     * The row's maximum is subtracted before exponentiating to avoid
-     * overflow; this does not change the result because softmax is unaffected
-     * by adding a constant to every input. The maximum is found with reduce
-     * rather than Math.max(...logits), because spreading a vocabulary-sized row
-     * as arguments can exceed the engine's argument limit.
-     *
-     * @param logits - One logit per token in the vocabulary, indexed by token id.
-     * @returns One probability per token in the vocabulary, indexed by token id.
-     */
-    static softmax(logits) {
-        const maxLogit = logits.reduce((max, value) => Math.max(max, value), -Infinity);
-        const exponentiated = logits.map((value) => Math.exp(value - maxLogit));
-        const total = exponentiated.reduce((sum, value) => sum + value, 0);
-        return exponentiated.map((value) => value / total);
     }
 }
 export default Generator;

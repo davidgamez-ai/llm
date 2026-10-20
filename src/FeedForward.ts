@@ -9,10 +9,11 @@ import DEBUG from "./Debug.js";
  * to 4 * embeddingSize values, a GELU activation, then a second linear
  * layer that projects it back down to embeddingSize values.
  *
- * The network processes one token vector at a time. Every token in a
- * sequence goes through the same weights independently, so a whole
- * sequence is processed by calling update() on each of its tokens.
- * The shapes as data flows through the network are:
+ * The network is "position-wise": every token in a sequence goes through
+ * the same weights independently, and tokens never interact. update()
+ * takes the whole sequence at once so that, during training, the instance
+ * can keep the values it needs for backpropagation for every token.
+ * The shapes of each token vector as data flows through the network are:
  *
  * - First linear layer: embeddingSize in, 4 * embeddingSize out.
  * - GELU: 4 * embeddingSize in and out.
@@ -112,13 +113,14 @@ class FeedForward {
   }
 
   /**
-   * Runs a single token vector through the network: first linear layer,
-   * GELU, then second linear layer.
+   * Runs each token vector in a sequence through the network independently:
+   * first linear layer, GELU, then second linear layer. Every token uses the
+   * same weights.
    *
-   * @param token - The embedding of one token: embeddingSize values.
-   * @returns The transformed token vector: embeddingSize values.
+   * @param tokens - The token vectors: one row per token, each row embeddingSize values wide.
+   * @returns The transformed token vectors: one row per token, in token order, each embeddingSize values wide.
    */
-  update(token: number[]): number[] {
+  update(tokens: number[][]): number[][] {
     /*
      * GELU using the tanh approximation from the original GPT-2 code:
      * 0.5 * x * (1 + tanh(sqrt(2 / pi) * (x + 0.044715 * x^3))).
@@ -134,11 +136,14 @@ class FeedForward {
      * the dot product of the vector with one column of the weight matrix,
      * plus that column's bias.
      */
-    const hidden = vectorTimesMatrix(token, this.firstLayerWeights, this.firstLayerBiases).map(gelu);
-    const output = vectorTimesMatrix(hidden, this.secondLayerWeights, this.secondLayerBiases);
+    const output: number[][] = [];
+    for (const token of tokens) {
+      const hidden = vectorTimesMatrix(token, this.firstLayerWeights, this.firstLayerBiases).map(gelu);
+      output.push(vectorTimesMatrix(hidden, this.secondLayerWeights, this.secondLayerBiases));
+    }
 
     if (DEBUG.FEED_FORWARD) {
-      console.log("FeedForward| Output:");
+      console.log("FeedForward| Output (one row per token):");
       console.table(output);
     }
 

@@ -3,6 +3,7 @@ import Embedding from "./Embedding.js";
 import Transformer from "./Transformer.js";
 import LayerNormalization from "./LayerNormalization.js";
 import LinearOutputLayer from "./LinearOutputLayer.js";
+import Dropout from "./Dropout.js";
 import DEBUG from "./Debug.js";
 /**
  * The GPT model. It converts a sequence of token ids into embeddings,
@@ -16,43 +17,29 @@ import DEBUG from "./Debug.js";
 class GPTModel {
     /** Converts token ids into combined token and position embeddings. */
     embedding;
+    /** Dropout applied to the embeddings (training mode only). Keeps its mask for backpropagation. */
+    embeddingDropout;
     /** The transformer blocks, applied in array order. There are numberTransformerBlocks of them. */
     transformers;
     /** Layer normalization applied to the output of the last transformer block, before the linear output layer. */
     finalLayerNormalization;
     /** Maps the final normalized token vectors to a score for every token in the vocabulary. */
     linearOutputLayer;
-    /** Probability, between 0 and 1, that each embedding value is dropped (set to zero) by dropout. */
-    dropoutRate;
-    /**
-     * The current mode: Hyperparameters.TRAINING_MODE, VALIDATION_MODE or
-     * GENERATION_MODE. Dropout is only applied to the embeddings in
-     * TRAINING_MODE. Read from Hyperparameters on every access, so changing
-     * Hyperparameters.mode after construction takes effect.
-     */
-    get mode() {
-        return this.getMode();
-    }
-    /** Reads the Hyperparameters' current mode. */
-    getMode;
-    /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
-    random;
     /**
      * Creates a GPTModel with an Embedding and a LinearOutputLayer, whose
-     * matrices are built immediately, numberTransformerBlocks Transformer
-     * instances and a final LayerNormalization, all built from the same
-     * Hyperparameters so their dimensions match. Every component draws its
-     * random values from the Hyperparameters' shared stream, so the whole
-     * model is reproducible when Hyperparameters.seed is set.
+     * matrices are built immediately, a Dropout for the embeddings,
+     * numberTransformerBlocks Transformer instances and a final
+     * LayerNormalization, all built from the same Hyperparameters so their
+     * dimensions match. Every component draws its random values from the
+     * Hyperparameters' shared stream, so the whole model is reproducible when
+     * Hyperparameters.seed is set.
      *
-     * @param hyperparameters - Source of numberTransformerBlocks, dropoutRate, mode and the random number stream, and passed on to Embedding, each Transformer, LayerNormalization and LinearOutputLayer. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of numberTransformerBlocks, and passed on to Embedding, Dropout, each Transformer, LayerNormalization and LinearOutputLayer. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
-        this.dropoutRate = hyperparameters.dropoutRate;
-        this.getMode = () => hyperparameters.mode;
-        this.random = () => hyperparameters.random();
         this.embedding = new Embedding(hyperparameters);
         this.embedding.build();
+        this.embeddingDropout = new Dropout(hyperparameters);
         this.transformers = Array.from({ length: hyperparameters.numberTransformerBlocks }, () => new Transformer(hyperparameters));
         this.finalLayerNormalization = new LayerNormalization(hyperparameters);
         /*
@@ -74,22 +61,13 @@ class GPTModel {
      */
     update(tokenIds) {
         const embeddings = this.embedding.getEmbeddingFromTokens(tokenIds);
-        /*
-         * Dropout on the embeddings, only in training mode. Each value is set to
-         * 0 with probability dropoutRate; the values that are kept are scaled by
-         * 1 / (1 - dropoutRate) so the expected size of each value is unchanged,
-         * as in Transformer. In validation and generation modes the embeddings
-         * are used unchanged.
-         */
-        let droppedEmbeddings = embeddings;
-        if (this.mode === Hyperparameters.TRAINING_MODE) {
-            const keepScale = 1 / (1 - this.dropoutRate);
-            droppedEmbeddings = embeddings.map((vector) => vector.map((value) => (this.random() < this.dropoutRate ? 0 : value * keepScale)));
-            if (DEBUG.GPT_MODEL) {
-                console.log(`GPTModel| Embeddings after dropout (dropout rate ${this.dropoutRate}):`);
-                if (DEBUG.VERBOSE)
-                    console.table(droppedEmbeddings);
-            }
+        // Dropout on the embeddings, only in training mode; in other modes the embeddings are used unchanged.
+        const droppedEmbeddings = this.embeddingDropout.update(embeddings);
+        // The mask is only set when dropout was applied, i.e. in training mode.
+        if (DEBUG.GPT_MODEL && this.embeddingDropout.mask !== null) {
+            console.log(`GPTModel| Embeddings after dropout (dropout rate ${this.embeddingDropout.dropoutRate}):`);
+            if (DEBUG.VERBOSE)
+                console.table(droppedEmbeddings);
         }
         // Pass the embeddings through each transformer block in sequence, feeding each block's output into the next.
         let transformerOutput = droppedEmbeddings;
@@ -97,7 +75,7 @@ class GPTModel {
             transformerOutput = transformer.update(transformerOutput);
         }
         // Final layer normalization, applied to each token vector independently, as in GPT-2.
-        const normalizedOutput = transformerOutput.map((vector) => this.finalLayerNormalization.update(vector));
+        const normalizedOutput = this.finalLayerNormalization.update(transformerOutput);
         if (DEBUG.GPT_MODEL) {
             console.log("GPTModel| Output of final layer normalization (one row per token):");
             if (DEBUG.VERBOSE)

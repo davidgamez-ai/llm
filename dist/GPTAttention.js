@@ -1,6 +1,8 @@
 import Hyperparameters from "./Hyperparameters.js";
 import { randomNormalMatrix } from "./WeightInitialization.js";
 import Matrix, { vectorTimesMatrix } from "./Matrix.js";
+import Dropout from "./Dropout.js";
+import { softmax } from "./Loss.js";
 import DEBUG from "./Debug.js";
 /**
  * Holds the trainable query, key and value weight matrices used by
@@ -14,19 +16,8 @@ class GPTAttention {
     embeddingSize;
     /** Number of columns in each weight matrix, i.e. the width of each projected query/key/value vector. */
     weightMatrixColumns;
-    /** Probability, between 0 and 1, that each attention weight is dropped (set to zero) by dropout. */
-    dropoutRate;
-    /**
-     * The current mode: Hyperparameters.TRAINING_MODE, VALIDATION_MODE or
-     * GENERATION_MODE. Dropout is only applied to the attention weights in
-     * TRAINING_MODE. Read from Hyperparameters on every access, so changing
-     * Hyperparameters.mode after construction takes effect.
-     */
-    get mode() {
-        return this.getMode();
-    }
-    /** Reads the Hyperparameters' current mode. */
-    getMode;
+    /** Dropout applied to the attention weights (training mode only). Keeps its mask for backpropagation. */
+    attentionDropout;
     /** The query weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
     queryWeights = new Matrix(0, 0);
     /** The key weight matrix built by build(): embeddingSize rows by weightMatrixColumns columns. */
@@ -47,17 +38,17 @@ class GPTAttention {
     random;
     /**
      * Creates a GPTAttention, copying embeddingSize, weightMatrixColumns,
-     * dropoutRate, qkvBias and linearLayerStandardDeviation from the given
+     * qkvBias and linearLayerStandardDeviation from the given
      * Hyperparameters so this instance always matches the values used
-     * elsewhere in the application, then builds the weight matrices and biases.
+     * elsewhere in the application, creates the attention weights' Dropout,
+     * then builds the weight matrices and biases.
      *
-     * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, dropoutRate, mode, qkvBias, linearLayerStandardDeviation and the random number stream. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Source of embeddingSize, weightMatrixColumns, qkvBias, linearLayerStandardDeviation and the random number stream, and passed on to Dropout. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
         this.embeddingSize = hyperparameters.embeddingSize;
         this.weightMatrixColumns = hyperparameters.weightMatrixColumns;
-        this.dropoutRate = hyperparameters.dropoutRate;
-        this.getMode = () => hyperparameters.mode;
+        this.attentionDropout = new Dropout(hyperparameters);
         this.qkvBias = hyperparameters.qkvBias;
         this.standardDeviation = hyperparameters.linearLayerStandardDeviation;
         this.random = () => hyperparameters.random();
@@ -221,60 +212,34 @@ class GPTAttention {
          * a future token's score was much larger, giving a NaN row.) The diagonal
          * is never masked, so every row has at least one finite score.
          */
-        const attentionWeights = maskedScores.map((row) => {
-            const max = Math.max(...row);
-            const exponentials = row.map((score) => Math.exp(score - max));
-            const total = exponentials.reduce((sum, value) => sum + value, 0);
-            return exponentials.map((value) => value / total);
-        });
+        const attentionWeights = maskedScores.map((row) => softmax(row));
         if (DEBUG.ATTENTION) {
             console.log("GPTAttention| Attention weights (masked softmax; values above the diagonal are 0, each row sums to 1):");
             console.table(attentionWeights);
         }
         /*
-         * Dropout is only applied in training mode. In validation and
-         * generation modes the attention weights are used unchanged as the
-         * final attention weights, so the output is deterministic.
+         * Dropout on the attention weights, only in training mode. A
+         * tokenCount x tokenCount mask is built in which each entry is 0 with
+         * probability dropoutRate and 1 / (1 - dropoutRate) otherwise, and the
+         * attention weights are multiplied by it element by element, so dropped
+         * weights become 0 and the expected value of each weight is unchanged.
+         * In validation and generation modes the attention weights are used
+         * unchanged as the final attention weights, so the output is
+         * deterministic.
          */
-        let finalAttentionWeights;
-        if (this.mode === Hyperparameters.TRAINING_MODE) {
-            /*
-             * Build a dropout mask with the same tokenCount x tokenCount
-             * dimensions as the attention weights. Each entry is independently
-             * set to 0 with probability dropoutRate, so on average that
-             * proportion of the mask is zero. The remaining entries are set to
-             * 1 / (1 - dropoutRate) so that, once the mask is applied, the
-             * expected value of each attention weight is unchanged. With the
-             * default dropoutRate of 0.1 the kept entries are 1 / 0.9, about 1.11.
-             */
-            const keepScale = 1 / (1 - this.dropoutRate);
-            const dropoutMask = attentionWeights.map((row) => row.map(() => (this.random() < this.dropoutRate ? 0 : keepScale)));
-            if (DEBUG.ATTENTION) {
-                console.log(`GPTAttention| Dropout mask (dropout rate ${this.dropoutRate}; kept values = ${keepScale}):`);
-                console.table(dropoutMask);
-            }
-            /*
-             * Apply dropout by multiplying the attention weights element by
-             * element with the dropout mask. Dropped weights become 0 and kept
-             * weights are scaled by 1 / (1 - dropoutRate).
-             */
-            finalAttentionWeights = [];
-            for (let i = 0; i < tokenCount; i++) {
-                finalAttentionWeights.push([]);
-                for (let j = 0; j < tokenCount; j++) {
-                    finalAttentionWeights[i].push(attentionWeights[i][j] * dropoutMask[i][j]);
-                }
-            }
-            if (DEBUG.ATTENTION)
+        const finalAttentionWeights = this.attentionDropout.update(attentionWeights);
+        if (DEBUG.ATTENTION) {
+            // The mask is only set when dropout was applied, i.e. in training mode.
+            if (this.attentionDropout.mask !== null) {
+                console.log(`GPTAttention| Dropout mask (dropout rate ${this.attentionDropout.dropoutRate}):`);
+                console.table(this.attentionDropout.mask);
                 console.log("GPTAttention| Final attention weights (after causal mask and dropout):");
-        }
-        else {
-            finalAttentionWeights = attentionWeights;
-            if (DEBUG.ATTENTION)
+            }
+            else {
                 console.log("GPTAttention| Validation or generation mode: dropout skipped. Final attention weights (after causal mask):");
-        }
-        if (DEBUG.ATTENTION)
+            }
             console.table(finalAttentionWeights);
+        }
         /*
          * For each token, multiply the value vector of every token (including
          * itself) by the corresponding weight from that token's row of the

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import Matrix, { vectorTimesMatrix, matrixTimesVector } from "../Matrix.js";
+import Matrix, { vectorTimesMatrix, matrixTimesVector, addOuterProduct, addToVector } from "../Matrix.js";
 
 // The 2 x 3 matrix [[1, 2, 3], [4, 5, 6]], used by several tests.
 const twoByThree = (): Matrix => Matrix.fromArrays([[1, 2, 3], [4, 5, 6]]);
@@ -75,4 +75,48 @@ test("matrixTimesVector() takes the dot product of each row with the vector", ()
 
 test("matrixTimesVector() rejects a vector of the wrong length", () => {
   assert.throws(() => matrixTimesVector(twoByThree(), [1, 2]), RangeError);
+});
+
+test("matrixTimesVector(W, e) equals vectorTimesMatrix(e, W transposed), as used in backpropagation", () => {
+  const matrix = twoByThree();
+  // Build the transpose by hand: 3 x 2, with (row, column) = (column, row) of the original.
+  const transpose = new Matrix(3, 2);
+  for (let row = 0; row < 2; row++) {
+    for (let column = 0; column < 3; column++) {
+      transpose.set(column, row, matrix.get(row, column));
+    }
+  }
+  const errors = [0.5, -2, 3];
+
+  assert.deepEqual(matrixTimesVector(matrix, errors), vectorTimesMatrix(errors, transpose));
+});
+
+test("addOuterProduct() adds input[row] * errors[column] to every gradient", () => {
+  const gradients = new Matrix(2, 3);
+
+  // [1, 2] outer [3, 4, 5] = [[3, 4, 5], [6, 8, 10]]
+  addOuterProduct(gradients, [1, 2], [3, 4, 5]);
+  assert.deepEqual(gradients.toArrays(), [[3, 4, 5], [6, 8, 10]]);
+
+  // A second token's contribution is added to the first, not replacing it.
+  addOuterProduct(gradients, [1, 0], [1, 1, 1]);
+  assert.deepEqual(gradients.toArrays(), [[4, 5, 6], [6, 8, 10]]);
+});
+
+test("addOuterProduct() rejects an input or errors of the wrong length", () => {
+  assert.throws(() => addOuterProduct(new Matrix(2, 3), [1, 2, 3], [1, 2, 3]), RangeError);
+  assert.throws(() => addOuterProduct(new Matrix(2, 3), [1, 2], [1, 2]), RangeError);
+});
+
+test("addToVector() adds the values element by element, in place", () => {
+  const target = new Float32Array([1, 2, 3]);
+
+  addToVector(target, [10, 20, 30]);
+  addToVector(target, [1, 1, 1]);
+
+  assert.deepEqual(Array.from(target), [12, 23, 34]);
+});
+
+test("addToVector() rejects values of the wrong length", () => {
+  assert.throws(() => addToVector(new Float32Array(3), [1, 2]), RangeError);
 });

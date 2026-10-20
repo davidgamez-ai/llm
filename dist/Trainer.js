@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
+import { crossEntropyLoss } from "./Loss.js";
 import DEBUG from "./Debug.js";
 /**
  * Loads training data and trains the model on it, following the book's
@@ -253,19 +254,8 @@ class Trainer {
         const logits = this.model.update(inputs);
         let totalLoss = 0;
         for (let position = 0; position < logits.length; position++) {
-            const row = logits[position];
-            /*
-             * The model returns logits rather than probabilities, so the log probability of
-             * the target is found with a log-softmax: logit[target] minus the log
-             * of the sum of the exponentiated logits. The row's maximum is
-             * subtracted before exponentiating to avoid overflow; this does not
-             * change the result because softmax is unaffected by adding a
-             * constant to every input.
-             */
-            const maxLogit = row.reduce((max, value) => Math.max(max, value), -Infinity);
-            const sumExp = row.reduce((sum, value) => sum + Math.exp(value - maxLogit), 0);
-            const logProbability = row[targets[position]] - maxLogit - Math.log(sumExp);
-            totalLoss -= logProbability;
+            // The negative log probability the model gives to the token that actually comes next.
+            totalLoss += crossEntropyLoss(logits[position], targets[position]);
             if (DEBUG.TRAINER && DEBUG.VERBOSE) {
                 console.log(`Trainer| Position ${position}. Total loss: ${totalLoss}`);
             }

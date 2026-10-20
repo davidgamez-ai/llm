@@ -39,38 +39,51 @@ class LayerNormalization {
   }
 
   /**
-   * Normalizes the values so they have a mean of 0 and a variance of 1, by
-   * subtracting the mean from each value and dividing by the square root
-   * of the variance plus epsilon. Each normalized value is then multiplied
-   * by its scale and has its shift added.
+   * Normalizes every token vector in a sequence independently, so each has
+   * a mean of 0 and a variance of 1, by subtracting the vector's mean from
+   * each of its values and dividing by the square root of its variance plus
+   * epsilon. Each normalized value is then multiplied by its dimension's
+   * scale and has its shift added. The same scale and shift are used for
+   * every token.
    *
-   * @param values - The values to normalize, e.g. one token's embedding vector. Must be embeddingSize values long.
-   * @returns A new array, the same length as values, holding the normalized, scaled and shifted values.
-   * @throws RangeError if values is not embeddingSize long, since there would be no scale and shift for some values.
+   * The whole sequence is passed in at once, rather than one token at a
+   * time, so that during training this instance can keep the values it
+   * needs for backpropagation for every token, not just the last one.
+   *
+   * @param vectors - The token vectors to normalize: one row per token, each row embeddingSize values wide.
+   * @returns A new matrix of the same shape holding the normalized, scaled and shifted vectors, in token order.
+   * @throws RangeError if any row is not embeddingSize long, since there would be no scale and shift for some values.
    */
-  update(values: number[]): number[] {
-    if (values.length !== this.embeddingSize) {
-      throw new RangeError(
-        `LayerNormalization| Expected ${this.embeddingSize} values; got ${values.length}`
-      );
+  update(vectors: number[][]): number[][] {
+    const output: number[][] = [];
+
+    for (let token = 0; token < vectors.length; token++) {
+      const values = vectors[token];
+      if (values.length !== this.embeddingSize) {
+        throw new RangeError(
+          `LayerNormalization| Token ${token}: expected ${this.embeddingSize} values; got ${values.length}`
+        );
+      }
+
+      const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+
+      /*
+       * The population variance (dividing by n rather than n - 1), which is
+       * what PyTorch's nn.LayerNorm and GPT-2 use.
+       */
+      const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+
+      const standardDeviation = Math.sqrt(variance + LayerNormalization.epsilon);
+
+      // Normalize each value, then apply that dimension's own scale and shift.
+      const normalizedVector: number[] = [];
+      for (let i = 0; i < values.length; i++) {
+        const normalized = (values[i] - mean) / standardDeviation;
+        normalizedVector.push(this.scale[i] * normalized + this.shift[i]);
+      }
+      output.push(normalizedVector);
     }
 
-    const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
-
-    /*
-     * The population variance (dividing by n rather than n - 1), which is
-     * what PyTorch's nn.LayerNorm and GPT-2 use.
-     */
-    const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
-
-    const standardDeviation = Math.sqrt(variance + LayerNormalization.epsilon);
-
-    // Normalize each value, then apply that dimension's own scale and shift.
-    const output: number[] = [];
-    for (let i = 0; i < values.length; i++) {
-      const normalized = (values[i] - mean) / standardDeviation;
-      output.push(this.scale[i] * normalized + this.shift[i]);
-    }
     return output;
   }
 

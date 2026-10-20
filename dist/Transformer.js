@@ -2,6 +2,7 @@ import Hyperparameters from "./Hyperparameters.js";
 import MultiHeadAttention from "./MultiHeadAttention.js";
 import FeedForward from "./FeedForward.js";
 import LayerNormalization from "./LayerNormalization.js";
+import Dropout from "./Dropout.js";
 import DEBUG from "./Debug.js";
 /**
  * A single GPT transformer block. It combines multi-head attention, which
@@ -35,38 +36,26 @@ class Transformer {
     attentionLayerNormalization;
     /** Layer normalization applied to the attention stage's output, before the feed forward network. */
     feedForwardLayerNormalization;
-    /** Probability, between 0 and 1, that each value of the attention output and the feed forward output is dropped (set to zero) by dropout. */
-    dropoutRate;
+    /** Dropout applied to the attention output (training mode only). Keeps its mask for backpropagation. */
+    attentionOutputDropout;
+    /** Dropout applied to the feed forward output (training mode only). Keeps its mask for backpropagation. */
+    feedForwardOutputDropout;
     /**
-     * The current mode: Hyperparameters.TRAINING_MODE, VALIDATION_MODE or
-     * GENERATION_MODE. Dropout is only applied to the attention output and the
-     * feed forward output in TRAINING_MODE. Read from Hyperparameters on every access, so changing
-     * Hyperparameters.mode after construction takes effect.
-     */
-    get mode() {
-        return this.getMode();
-    }
-    /** Reads the Hyperparameters' current mode. */
-    getMode;
-    /** Draws from the Hyperparameters' shared random number stream, which is seeded when Hyperparameters.seed is set. */
-    random;
-    /**
-     * Creates a Transformer with its own MultiHeadAttention, FeedForward and
-     * two LayerNormalization instances, all built from the same
-     * Hyperparameters so their dimensions match, and copies dropoutRate
-     * from them. Each layer normalization has its own trainable
-     * scale and shift, so the two are separate instances.
+     * Creates a Transformer with its own MultiHeadAttention, FeedForward, two
+     * LayerNormalization instances and two Dropout instances, all built from
+     * the same Hyperparameters so their dimensions match. Each layer
+     * normalization has its own trainable scale and shift, and each dropout
+     * its own mask, so they are separate instances.
      *
-     * @param hyperparameters - Source of dropoutRate, mode and the random number stream, and passed on to MultiHeadAttention, FeedForward and LayerNormalization. Defaults to a new Hyperparameters instance.
+     * @param hyperparameters - Passed on to MultiHeadAttention, FeedForward, LayerNormalization and Dropout. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
-        this.dropoutRate = hyperparameters.dropoutRate;
-        this.getMode = () => hyperparameters.mode;
-        this.random = () => hyperparameters.random();
         this.multiHeadAttention = new MultiHeadAttention(hyperparameters);
         this.feedForward = new FeedForward(hyperparameters);
         this.attentionLayerNormalization = new LayerNormalization(hyperparameters);
         this.feedForwardLayerNormalization = new LayerNormalization(hyperparameters);
+        this.attentionOutputDropout = new Dropout(hyperparameters);
+        this.feedForwardOutputDropout = new Dropout(hyperparameters);
     }
     /**
      * Runs the token embeddings through the transformer block: layer
@@ -75,18 +64,18 @@ class Transformer {
      * output, layer normalization, the feed forward network, dropout
      * (training mode only), then a second shortcut connection adding the
      * attention stage's output to the feed forward output. Layer
-     * normalization and the feed forward network are applied to each token
-     * vector separately.
+     * normalization and the feed forward network are given the whole
+     * sequence, but process each token vector separately.
      *
      * @param embeddings - Token embeddings: one row per token, each row embeddingSize values wide.
      * @returns The output of the block: one row per token, in token order, each row embeddingSize values wide.
      */
     update(embeddings) {
         // Normalize each token embedding independently before attention.
-        const normalizedEmbeddings = embeddings.map((embedding) => this.attentionLayerNormalization.update(embedding));
+        const normalizedEmbeddings = this.attentionLayerNormalization.update(embeddings);
         const attentionOutput = this.multiHeadAttention.update(normalizedEmbeddings);
         // Dropout on the attention output before it is added to the shortcut (training mode only).
-        const droppedAttentionOutput = this.dropout(attentionOutput, "Attention output");
+        const droppedAttentionOutput = this.applyDropout(this.attentionOutputDropout, attentionOutput, "Attention output");
         /*
          * Shortcut (residual) connection: add the original, unnormalized input
          * embeddings to the attention output, element by element. This gives
@@ -96,11 +85,11 @@ class Transformer {
          */
         const shortcutOutput = this.add(droppedAttentionOutput, embeddings);
         // Normalize each shortcut output vector independently before the feed forward network.
-        const normalizedShortcutOutput = shortcutOutput.map((vector) => this.feedForwardLayerNormalization.update(vector));
-        // The feed forward network processes one token vector at a time.
-        const feedForwardOutput = normalizedShortcutOutput.map((vector) => this.feedForward.update(vector));
+        const normalizedShortcutOutput = this.feedForwardLayerNormalization.update(shortcutOutput);
+        // The feed forward network transforms each token vector independently.
+        const feedForwardOutput = this.feedForward.update(normalizedShortcutOutput);
         // Dropout on the feed forward output before it is added to the shortcut (training mode only).
-        const droppedFeedForwardOutput = this.dropout(feedForwardOutput, "Feed forward output");
+        const droppedFeedForwardOutput = this.applyDropout(this.feedForwardOutputDropout, feedForwardOutput, "Feed forward output");
         /*
          * Second shortcut connection: add the output of the attention stage
          * (including the first shortcut) to the feed forward output, element by
@@ -134,24 +123,20 @@ class Transformer {
         return sum;
     }
     /**
-     * Applies dropout to a stage's output, only in training mode. Each value
-     * is set to 0 with probability dropoutRate; the values that are kept are
-     * scaled by 1 / (1 - dropoutRate) so the expected size of each value is
-     * unchanged, as in GPTAttention. In validation and generation modes the
-     * values are returned unchanged.
+     * Applies one of the block's dropouts to a stage's output and logs the
+     * result. Dropout only changes the values in training mode; in validation
+     * and generation modes they are returned unchanged.
      *
+     * @param dropout - The Dropout instance for this stage, which keeps its mask for backpropagation.
      * @param values - The stage's output: one row per token, each row embeddingSize values wide.
      * @param label - Name of the stage, used in debug output.
      * @returns A new matrix with dropout applied in training mode; otherwise values itself.
      */
-    dropout(values, label) {
-        if (this.mode !== Hyperparameters.TRAINING_MODE) {
-            return values;
-        }
-        const keepScale = 1 / (1 - this.dropoutRate);
-        const dropped = values.map((vector) => vector.map((value) => (this.random() < this.dropoutRate ? 0 : value * keepScale)));
-        if (DEBUG.TRANSFORMER) {
-            console.log(`Transformer| ${label} after dropout (dropout rate ${this.dropoutRate}):`);
+    applyDropout(dropout, values, label) {
+        const dropped = dropout.update(values);
+        // The mask is only set when dropout was applied, i.e. in training mode.
+        if (DEBUG.TRANSFORMER && dropout.mask !== null) {
+            console.log(`Transformer| ${label} after dropout (dropout rate ${dropout.dropoutRate}):`);
             console.table(dropped);
         }
         return dropped;

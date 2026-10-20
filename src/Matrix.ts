@@ -196,4 +196,85 @@ export function matrixTimesVector(matrix: Matrix, vector: ArrayLike<number>): nu
   return result;
 }
 
+/*
+ * Backpropagation through a linear layer
+ * ---------------------------------------
+ * A linear layer calculates output = input x weights (+ biases). Training
+ * needs two things from each such layer:
+ *
+ * 1. The errors at its inputs, to pass back to the layer before. Each input
+ *    value contributed to every output value through one row of weights, so
+ *    its error is the dot product of that row with the output errors. This
+ *    is the forward calculation with the weights transposed. The two
+ *    multiplication functions above are each other's transpose, so no new
+ *    function is needed:
+ *
+ *    | Weights stored                               | Forward                    | Backward (errors to inputs)      |
+ *    |----------------------------------------------|----------------------------|----------------------------------|
+ *    | input x output (GPTAttention,                | vectorTimesMatrix(x, W)    | matrixTimesVector(W, errors)     |
+ *    |   MultiHeadAttention, FeedForward)           |                            |                                  |
+ *    | output x input (LinearOutputLayer)           | matrixTimesVector(W, x)    | vectorTimesMatrix(errors, W)     |
+ *
+ * 2. The gradients of its weights and biases. Each weight connects one input
+ *    to one output, so its gradient is that input times that output's error
+ *    (addOuterProduct, below). Each bias is added straight to one output, so
+ *    its gradient is that output's error (addToVector, below). The same
+ *    weights are used for every token, so the gradients are summed over the
+ *    tokens: these functions add to the gradients rather than replacing them.
+ */
+
+/**
+ * Adds the outer product of two vectors to a gradient matrix: the weight
+ * gradient of a linear layer for one token.
+ *
+ *     gradients(row, column) += input[row] * errors[column]
+ *
+ * The weight at (row, column) connects input row to output column, so the
+ * rate at which the loss changes with that weight is the input value
+ * multiplied by the output's error: dnn's "weight gradient = error x input".
+ * Calling this once per token sums the gradient over every token.
+ *
+ * @param gradients - The gradient matrix to add to: input.length rows by errors.length columns, the same shape as the weights.
+ * @param input - The layer's input for one token: one value per row.
+ * @param errors - The errors at the layer's output for the same token: one value per column.
+ * @throws RangeError if input does not have gradients.rows values or errors does not have gradients.columns values.
+ */
+export function addOuterProduct(gradients: Matrix, input: ArrayLike<number>, errors: ArrayLike<number>): void {
+  if (input.length !== gradients.rows || errors.length !== gradients.columns) {
+    throw new RangeError(
+      `Matrix| A ${gradients.rows} x ${gradients.columns} gradient matrix needs ${gradients.rows} inputs and ` +
+      `${gradients.columns} errors; got ${input.length} and ${errors.length}`
+    );
+  }
+
+  // Row by row, in storage order: row r gets input[r] times the whole errors vector.
+  for (let row = 0; row < gradients.rows; row++) {
+    const value: number = input[row];
+    const rowStart: number = row * gradients.columns;
+    for (let column = 0; column < gradients.columns; column++) {
+      gradients.data[rowStart + column] += value * errors[column];
+    }
+  }
+}
+
+/**
+ * Adds one vector to another, element by element: used to sum bias
+ * gradients over tokens, since a bias's gradient for one token is the error
+ * of the output it is added to.
+ *
+ *     target[i] += values[i]
+ *
+ * @param target - The vector to add to, e.g. a bias gradient. Changed in place.
+ * @param values - The values to add, e.g. one token's output errors. Must be the same length as target.
+ * @throws RangeError if values is not the same length as target.
+ */
+export function addToVector(target: Float32Array, values: ArrayLike<number>): void {
+  if (values.length !== target.length) {
+    throw new RangeError(`Matrix| Cannot add ${values.length} values to a vector of ${target.length}`);
+  }
+  for (let i = 0; i < target.length; i++) {
+    target[i] += values[i];
+  }
+}
+
 export default Matrix;

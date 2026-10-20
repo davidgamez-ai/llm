@@ -84,6 +84,15 @@ test("calculateValidationLoss() is deterministic and matches the loss reported b
     assert.equal(trainer.calculateValidationLoss(), losses[0].validationLoss);
     assert.equal(trainer.calculateValidationLoss(), losses[0].validationLoss);
 });
+test("calculateValidationLoss() of the untrained model matches the recorded reference", () => {
+    const { trainer } = setUp();
+    /*
+     * Recorded before the loss calculation was moved into Loss.ts, so this
+     * catches any change to the loss or the forward pass. Close to
+     * ln(vocabularySize) = ln(50257), about 10.82, as expected for an untrained model.
+     */
+    assert.ok(Math.abs(trainer.calculateValidationLoss() - 10.81001060108122) <= 1e-12);
+});
 test("train() throws a clear error when there is not enough text for one batch", () => {
     const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
     const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
