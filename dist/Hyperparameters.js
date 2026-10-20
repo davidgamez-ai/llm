@@ -63,14 +63,21 @@ class Hyperparameters {
     /**
      * Creates a Hyperparameters instance.
      *
-     * @param embeddingSize - The size of each token embedding vector.
+     * The defaults for the model's architecture are those of GPT-2 small
+     * (embeddingSize 768, contextLength 1024, 12 attention heads, 12
+     * transformer blocks, dropout 0.1, biases in every linear layer). With
+     * them the model has 163,037,184 parameters. GPT-2 itself has 124,439,808,
+     * because it ties the linear output layer to the token embedding (the two
+     * share one matrix); here they are separate, as in the book, which adds
+     * 50,257 x 768 = 38,597,376.
+     *
+     * @param embeddingSize - The size of each token embedding vector. Defaults
+     * to 768, as in GPT-2 small.
      * @param contextLength - The number of tokens of context the model
-     * operates over at once. Defaults to 12 to keep runs fast; GPT-2 uses
-     * 1024. The position embedding matrix has contextLength rows, so this
-     * also changes the parameter count: with the other defaults the model has
-     * 163,009,536 parameters (matching the book) only when contextLength is
-     * 1024, and 162,232,320 with the default of 12. Must be a positive whole
-     * number.
+     * operates over at once. Defaults to 1024, as in GPT-2. The position
+     * embedding matrix has contextLength rows, so this also changes the
+     * parameter count. Training runs are much faster with a smaller value.
+     * Must be a positive whole number.
      * @param dropoutRate - The probability, between 0 and 1 inclusive, that
      * any given value is dropped (set to zero) during dropout.
      * @param mode - What the model is being used for: TRAINING_MODE,
@@ -84,7 +91,9 @@ class Hyperparameters {
      * one batch. Must be a positive whole number.
      * @param qkvBias - True if the query, key and value projections in each
      * attention head add a bias to their outputs; false if they do not.
-     * Defaults to false, as in the book's GPT-2 configuration.
+     * Defaults to true, as in GPT-2. The book sets it to false when training
+     * from scratch (giving its count of 163,009,536 parameters), and to true
+     * when it loads OpenAI's GPT-2 weights.
      * @param feedForwardBias - True if the linear layers of the feed forward
      * network add a bias to their outputs; false if they do not. Defaults to
      * true, as in GPT-2.
@@ -159,7 +168,7 @@ class Hyperparameters {
      */
     constructor(embeddingSize = 768, //GPT-2 uses 768
     contextLength = 1024, //GPT-2 uses 1024
-    dropoutRate = 0.1, mode = Hyperparameters.TRAINING_MODE, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = false, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, linearLayerStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, trainingRatio = 0.9, numberEpochs = 1, learningRate = 0.0004, beta1 = 0.9, beta2 = 0.999, optimizerEpsilon = 1e-8, weightDecay = 0.1, seed) {
+    dropoutRate = 0.1, mode = Hyperparameters.TRAINING_MODE, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = true, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, linearLayerStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, trainingRatio = 0.9, numberEpochs = 1, learningRate = 0.0004, beta1 = 0.9, beta2 = 0.999, optimizerEpsilon = 1e-8, weightDecay = 0.1, seed) {
         Hyperparameters.validatePositiveInteger("contextLength", contextLength);
         Hyperparameters.validateDropoutRate(dropoutRate);
         Hyperparameters.validateMode(mode);
@@ -204,6 +213,67 @@ class Hyperparameters {
         this._weightDecay = weightDecay;
         this._seed = seed;
         this._random = Hyperparameters.createRandom(seed);
+    }
+    /**
+     * Creates Hyperparameters for a model small enough to train on
+     * data/the-verdict.txt in a few hours, as a demonstration that the model
+     * learns. The defaults, GPT-2 small, are far too slow to train in plain
+     * TypeScript, and their context length of 1024 is longer than the
+     * validation part of the-verdict.txt (547 tokens), so no validation window
+     * could be made from it.
+     *
+     * Compared with GPT-2 small:
+     * - embeddingSize 128 instead of 768. Most of the training time is spent
+     *   on the vocabulary: the output layer and the token embedding each have
+     *   50,257 rows of embeddingSize values, so their cost grows in proportion
+     *   to embeddingSize.
+     * - numberAttentionHeads 4, so each head works with 32 values (GPT-2
+     *   small uses 64).
+     * - numberTransformerBlocks 4 instead of 12.
+     * - contextLength 128 instead of 1024. Shorter windows are cheaper, give
+     *   more windows (and so more weight updates) per epoch, and fit in the
+     *   validation set. The book reduces it to 256 for the same reasons.
+     * - learningRate 0.001 instead of the book's 0.0004: a smaller model
+     *   tolerates, and needs, larger steps.
+     * - numberEpochs 50, and outputLength 50, so generated samples are long
+     *   enough to judge.
+     *
+     * Everything else (dropout 0.1, biases, weight initialization, batchSize
+     * 2, the other AdamW settings) keeps its default.
+     *
+     * These values were chosen by training on the-verdict.txt. The model has
+     * about 14 million parameters, and each epoch takes about 3 minutes on a
+     * laptop, so 50 epochs take about 2.5 hours. In a test run the training
+     * loss fell from 9.8 after the first epoch to 3.2 after 12, and samples
+     * changed from "Every effort moves you." through repeated commas to
+     * "Every effort moves you know his pictures--I had been my dear I had
+     * been...". A larger model (embeddingSize 256, 8 heads) took over twice as
+     * long per epoch and was still only repeating "the" and commas after 5
+     * epochs, so within a few hours a smaller model gets further.
+     *
+     * The text is only about 5,000 tokens long, so the model mostly learns to
+     * reproduce it: generated text becomes recognisably like the story, as in
+     * the book's chapter 5, rather than general English. The validation loss
+     * stops falling after about 8 epochs and then rises slowly, which is
+     * overfitting, as the book also shows.
+     *
+     * @returns A new Hyperparameters instance, in TRAINING_MODE, with no seed.
+     */
+    static forReducedTraining() {
+        const hyperparameters = new Hyperparameters();
+        /*
+         * The number of heads is set before the embedding size because each
+         * setter checks that the embedding divides evenly between the heads:
+         * 768 / 4 and 128 / 4 are both whole numbers, but 128 / 12 is not.
+         */
+        hyperparameters.numberAttentionHeads = 4;
+        hyperparameters.embeddingSize = 128;
+        hyperparameters.numberTransformerBlocks = 4;
+        hyperparameters.contextLength = 128;
+        hyperparameters.learningRate = 0.001;
+        hyperparameters.numberEpochs = 50;
+        hyperparameters.outputLength = 50;
+        return hyperparameters;
     }
     /**
      * Creates the random number stream for a seed.

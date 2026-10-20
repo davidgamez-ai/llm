@@ -186,10 +186,14 @@ class GPTModel {
    * transformer block, the final layer normalization and the linear output
    * layer. Dropout has no parameters.
    *
-   * The count depends on contextLength, because the position embedding has
-   * one row per position. With the default Hyperparameters it only matches
-   * the book's 163,009,536 when contextLength is set to GPT-2's 1024; the
-   * default contextLength of 12 gives 777,216 fewer (162,232,320).
+   * With the default Hyperparameters (GPT-2 small) the count is 163,037,184.
+   * Subtracting the linear output layer's 38,597,376 gives GPT-2's
+   * 124,439,808: GPT-2 ties the output layer to the token embedding, so it
+   * does not count those weights twice. The book's 163,009,536 is 27,648
+   * fewer, because it turns off the query, key and value biases
+   * (qkvBias false: 3 x 768 biases in each of the 12 blocks). The count also
+   * depends on contextLength, because the position embedding has one row
+   * per position.
    *
    * @returns The total number of parameters in the model.
    */

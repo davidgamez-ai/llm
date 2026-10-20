@@ -811,22 +811,62 @@ trains the model.
 
 ## C2. Demo configuration for training runs
 
-The default (GPT-2 small, ~162M parameters) configuration is far too large to
-train in plain TypeScript: AdamW needs a gradient and two moments per
-parameter, about 2.6 GB in total, and each step would be very slow.
+The defaults in `Hyperparameters` are GPT-2 small's architecture:
+embeddingSize 768, contextLength 1024, 12 heads, 12 blocks, dropout 0.1, and
+biases in every linear layer, including the query, key and value
+projections (`qkvBias` true, as in GPT-2; the book turns them off when
+training from scratch). This gives 163,037,184 parameters, or GPT-2's
+124,439,808 without the separate output layer, which GPT-2 ties to the
+token embedding.
 
-| Hyperparameter | Value |
-| --- | --- |
-| `embeddingSize` | 64 |
-| `numberAttentionHeads` | 4 |
-| `numberTransformerBlocks` | 2 |
-| `contextLength` | 32 |
-| `batchSize` | 4 |
-| `numberEpochs` | 10 |
+This configuration is far too large to train in plain TypeScript: AdamW
+needs a gradient and two moments per parameter, about 2.6 GB in total, and
+each step would be very slow. It also cannot train on
+`data/the-verdict.txt` at all: with contextLength 1024 every window needs
+1,025 tokens, but the validation set is only 547 tokens, so `Trainer.train()`
+throws. The book reduces contextLength to 256 in chapter 5 for the same
+reasons.
 
-The token embedding and output layer alone are still 2 × 50,257 × 64 ≈ 6.4
-million parameters, so the vocabulary dominates. A smaller vocabulary is a
-possible later change, but out of scope here.
+**`Hyperparameters.forReducedTraining()`** returns a configuration chosen
+by measurement for training on `the-verdict.txt` in a few hours:
+
+| Hyperparameter | Value | GPT-2 small |
+| --- | --- | --- |
+| `embeddingSize` | 128 | 768 |
+| `numberAttentionHeads` | 4 (32 values per head) | 12 (64) |
+| `numberTransformerBlocks` | 4 | 12 |
+| `contextLength` | 128 | 1024 |
+| `learningRate` | 0.001 | (book: 0.0004) |
+| `numberEpochs` | 50 | (book: 10) |
+| `outputLength` | 50 | |
+
+Everything else keeps its default. The model has about 14 million
+parameters.
+
+**How the values were chosen.** A benchmark of one training step showed
+that time is dominated by the vocabulary-sized arrays, so cost per token
+grows roughly with embeddingSize. Two configurations were then trained on
+`the-verdict.txt`, printing the losses and a greedy sample from "Every
+effort moves you" after each epoch:
+
+| Epoch | embeddingSize 128, 4 heads (chosen) | embeddingSize 256, 8 heads |
+| --- | --- | --- |
+| time per epoch | about 3 minutes | about 7 minutes |
+| 1 | train 9.76, val 8.30: "you." | train 8.77, val 6.62: ",,,,,," |
+| 5 | train 5.37, val 6.10: "you, I had to the, I had to the." | train 5.68, val 6.48: ",,,,,," |
+| 8 | train 4.27, val 5.87: "you was the--I had to the--I had a" | stopped |
+| 12 | train 3.18, val 6.03: "you know his pictures--I had been my dear I had been--I had been..." | |
+
+The larger model was still at the "repeat the commonest token" stage after
+5 epochs, so within a few hours the smaller one gets further. The
+validation loss bottoms out around epoch 8 and then rises: the model is
+overfitting the 5,000-token story, as in the book. The samples repeat
+themselves because the `Generator` uses greedy decoding; the book adds
+temperature and top-k sampling to fix this.
+
+The token embedding and output layer are still 2 × 50,257 × 128 ≈ 12.9 of
+the 14 million parameters, so the vocabulary dominates. A smaller
+vocabulary is a possible later change, but out of scope here.
 
 ## C3. Optional extras (after step 18)
 

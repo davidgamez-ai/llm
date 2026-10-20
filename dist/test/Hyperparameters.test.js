@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "fs";
+import * as path from "path";
 import Hyperparameters from "../Hyperparameters.js";
+import BPETokenizer from "../BPETokenizer.js";
 // Values that fail the positive whole number check: zero, negative, fractional, NaN and Infinity.
 const NON_POSITIVE_INTEGERS = [0, -1, 1.5, NaN, Infinity];
 test("unvalidated setters store the new value", () => {
@@ -20,7 +23,49 @@ test("contextLength setter rejects invalid values and leaves state unchanged", (
     for (const value of NON_POSITIVE_INTEGERS) {
         assert.throws(() => { hyperparameters.contextLength = value; }, RangeError, `accepted ${value}`);
     }
-    assert.equal(hyperparameters.contextLength, 12);
+    assert.equal(hyperparameters.contextLength, 1024);
+});
+test("forReducedTraining() gives a smaller model for training in a few hours", () => {
+    const hyperparameters = Hyperparameters.forReducedTraining();
+    assert.equal(hyperparameters.embeddingSize, 128);
+    assert.equal(hyperparameters.numberAttentionHeads, 4);
+    assert.equal(hyperparameters.weightMatrixColumns, 32);
+    assert.equal(hyperparameters.numberTransformerBlocks, 4);
+    assert.equal(hyperparameters.contextLength, 128);
+    assert.equal(hyperparameters.learningRate, 0.001);
+    assert.equal(hyperparameters.numberEpochs, 50);
+    assert.equal(hyperparameters.outputLength, 50);
+    // Unchanged from GPT-2 small.
+    assert.equal(hyperparameters.vocabularySize, 50257);
+    assert.equal(hyperparameters.dropoutRate, 0.1);
+    assert.equal(hyperparameters.qkvBias, true);
+    assert.equal(hyperparameters.mode, Hyperparameters.TRAINING_MODE);
+});
+test("forReducedTraining() returns a new instance each time, leaving the GPT-2 small defaults alone", () => {
+    const first = Hyperparameters.forReducedTraining();
+    first.numberEpochs = 2;
+    assert.equal(Hyperparameters.forReducedTraining().numberEpochs, 50);
+    assert.equal(new Hyperparameters().embeddingSize, 768);
+});
+test("forReducedTraining()'s context length fits the validation part of the-verdict.txt", () => {
+    const hyperparameters = Hyperparameters.forReducedTraining();
+    const filePath = path.join(import.meta.dirname, "..", "..", "data", "the-verdict.txt");
+    const text = fs.readFileSync(filePath, "utf-8");
+    const validationText = text.slice(Math.floor(hyperparameters.trainingRatio * text.length));
+    // A window needs contextLength + 1 tokens; the validation part should hold several.
+    const validationTokens = new BPETokenizer().encode(validationText).length;
+    assert.ok(validationTokens >= 4 * (hyperparameters.contextLength + 1), `only ${validationTokens} validation tokens`);
+});
+test("the architecture defaults are those of GPT-2 small", () => {
+    const hyperparameters = new Hyperparameters();
+    assert.equal(hyperparameters.vocabularySize, 50257);
+    assert.equal(hyperparameters.embeddingSize, 768);
+    assert.equal(hyperparameters.contextLength, 1024);
+    assert.equal(hyperparameters.numberAttentionHeads, 12);
+    assert.equal(hyperparameters.numberTransformerBlocks, 12);
+    assert.equal(hyperparameters.dropoutRate, 0.1);
+    assert.equal(hyperparameters.qkvBias, true);
+    assert.equal(hyperparameters.feedForwardBias, true);
 });
 test("trainingRatio defaults to 0.9 and numberEpochs to 1", () => {
     const hyperparameters = new Hyperparameters();

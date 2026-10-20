@@ -310,7 +310,10 @@ const allParameters = (model: GPTModel): ModelParameter[] => {
       add(`block ${b} head ${h} query weights`, head.queryWeights.data, () => head.queryWeightGradients.data, true);
       add(`block ${b} head ${h} key weights`, head.keyWeights.data, () => head.keyWeightGradients.data, true);
       add(`block ${b} head ${h} value weights`, head.valueWeights.data, () => head.valueWeightGradients.data, true);
-      // The query, key and value biases are empty: qkvBias is false by default, as in the book.
+      // qkvBias is true by default, as in GPT-2.
+      add(`block ${b} head ${h} query biases`, head.queryBiases, () => head.queryBiasGradients, false);
+      add(`block ${b} head ${h} key biases`, head.keyBiases, () => head.keyBiasGradients, false);
+      add(`block ${b} head ${h} value biases`, head.valueBiases, () => head.valueBiasGradients, false);
     });
     add(`block ${b} attention output projection weights`, attention.outputProjectionWeights.data, () => attention.outputProjectionWeightGradients.data, true);
     add(`block ${b} attention output projection biases`, attention.outputProjectionBiases, () => attention.outputProjectionBiasGradients, false);
