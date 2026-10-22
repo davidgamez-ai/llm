@@ -1,9 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import * as fs from "fs";
-import * as path from "path";
 import Hyperparameters from "../Hyperparameters.js";
-import BPETokenizer from "../BPETokenizer.js";
+import GPTModel from "../GPTModel.js";
 // Values that fail the positive whole number check: zero, negative, fractional, NaN and Infinity.
 const NON_POSITIVE_INTEGERS = [0, -1, 1.5, NaN, Infinity];
 test("unvalidated setters store the new value", () => {
@@ -25,36 +23,62 @@ test("contextLength setter rejects invalid values and leaves state unchanged", (
     }
     assert.equal(hyperparameters.contextLength, 1024);
 });
-test("forReducedTraining() gives a smaller model for training in a few hours", () => {
+test("forReducedTraining() defaults to 2.5 hours: a small model for one pass over about 2,200 stories", () => {
     const hyperparameters = Hyperparameters.forReducedTraining();
-    assert.equal(hyperparameters.embeddingSize, 128);
+    assert.equal(hyperparameters.embeddingSize, 64);
     assert.equal(hyperparameters.numberAttentionHeads, 4);
-    assert.equal(hyperparameters.weightMatrixColumns, 32);
+    assert.equal(hyperparameters.weightMatrixColumns, 16);
     assert.equal(hyperparameters.numberTransformerBlocks, 4);
     assert.equal(hyperparameters.contextLength, 128);
-    assert.equal(hyperparameters.learningRate, 0.001);
-    assert.equal(hyperparameters.numberEpochs, 50);
+    assert.equal(hyperparameters.dropoutRate, 0);
+    assert.equal(hyperparameters.learningRate, 0.002);
+    assert.equal(hyperparameters.numberEpochs, 1);
+    // 2.5 hours x 187,000 tokens an hour / 210 tokens a story.
+    assert.equal(hyperparameters.numberTrainingStories, 2226);
     assert.equal(hyperparameters.outputLength, 50);
-    // Unchanged from GPT-2 small.
+    // Unchanged from the defaults.
     assert.equal(hyperparameters.vocabularySize, 50257);
-    assert.equal(hyperparameters.dropoutRate, 0.1);
+    assert.equal(hyperparameters.numberValidationStories, 100);
     assert.equal(hyperparameters.qkvBias, true);
     assert.equal(hyperparameters.mode, Hyperparameters.TRAINING_MODE);
 });
+test("forReducedTraining(hours) trains on stories in proportion to the hours", () => {
+    assert.equal(Hyperparameters.forReducedTraining(1).numberTrainingStories, 890);
+    assert.equal(Hyperparameters.forReducedTraining(5).numberTrainingStories, 4452);
+    assert.equal(Hyperparameters.forReducedTraining(10).numberTrainingStories, 8905);
+});
+test("forReducedTraining(hours) keeps the narrow model below 20 hours and uses the wider one from 20 hours", () => {
+    const below = Hyperparameters.forReducedTraining(19.9);
+    const from = Hyperparameters.forReducedTraining(20);
+    assert.equal(below.embeddingSize, 64);
+    assert.equal(below.learningRate, 0.002);
+    assert.equal(from.embeddingSize, 128);
+    assert.equal(from.weightMatrixColumns, 32);
+    assert.equal(from.learningRate, 0.001);
+    // The wider model gets through half as many tokens an hour: 20 x 93,500 / 210.
+    assert.equal(from.numberTrainingStories, 8905);
+});
+test("forReducedTraining(hours) trains on at least 10 stories, however short the time", () => {
+    assert.equal(Hyperparameters.forReducedTraining(0.001).numberTrainingStories, 10);
+});
+test("forReducedTraining(hours) rejects hours that are not a finite number greater than 0", () => {
+    for (const hours of [0, -1, NaN, Infinity]) {
+        assert.throws(() => Hyperparameters.forReducedTraining(hours), RangeError, `accepted ${hours}`);
+    }
+});
 test("forReducedTraining() returns a new instance each time, leaving the GPT-2 small defaults alone", () => {
     const first = Hyperparameters.forReducedTraining();
-    first.numberEpochs = 2;
-    assert.equal(Hyperparameters.forReducedTraining().numberEpochs, 50);
+    first.numberTrainingStories = 10;
+    assert.equal(Hyperparameters.forReducedTraining().numberTrainingStories, 2226);
     assert.equal(new Hyperparameters().embeddingSize, 768);
 });
-test("forReducedTraining()'s context length fits the validation part of the-verdict.txt", () => {
-    const hyperparameters = Hyperparameters.forReducedTraining();
-    const filePath = path.join(import.meta.dirname, "..", "..", "data", "the-verdict.txt");
-    const text = fs.readFileSync(filePath, "utf-8");
-    const validationText = text.slice(Math.floor(hyperparameters.trainingRatio * text.length));
-    // A window needs contextLength + 1 tokens; the validation part should hold several.
-    const validationTokens = new BPETokenizer().encode(validationText).length;
-    assert.ok(validationTokens >= 4 * (hyperparameters.contextLength + 1), `only ${validationTokens} validation tokens`);
+test("forReducedTraining() builds a model of about 6.5 million parameters, almost all in the vocabulary", () => {
+    const model = new GPTModel(Hyperparameters.forReducedTraining());
+    const total = model.getParameterCount();
+    const vocabulary = 2 * 50257 * 64;
+    assert.ok(total > 6.4e6 && total < 6.8e6, `${total} parameters`);
+    // The token embedding and output layer: 50,257 x 64 each.
+    assert.ok(vocabulary / total > 0.95);
 });
 test("the architecture defaults are those of GPT-2 small", () => {
     const hyperparameters = new Hyperparameters();
@@ -294,6 +318,34 @@ test("the optimizer hyperparameter setters reject invalid values, leaving state 
     assert.equal(hyperparameters.beta2, 0.999);
     assert.equal(hyperparameters.optimizerEpsilon, 1e-8);
     assert.equal(hyperparameters.weightDecay, 0.1);
+});
+test("numberTrainingStories defaults to 1000 and numberValidationStories to 100", () => {
+    const hyperparameters = new Hyperparameters();
+    assert.equal(hyperparameters.numberTrainingStories, 1000);
+    assert.equal(hyperparameters.numberValidationStories, 100);
+});
+test("the story count setters store positive whole numbers", () => {
+    const hyperparameters = new Hyperparameters();
+    hyperparameters.numberTrainingStories = 5000;
+    hyperparameters.numberValidationStories = 1;
+    assert.equal(hyperparameters.numberTrainingStories, 5000);
+    assert.equal(hyperparameters.numberValidationStories, 1);
+});
+test("the story count setters reject invalid values, leaving state unchanged", () => {
+    const hyperparameters = new Hyperparameters();
+    for (const value of NON_POSITIVE_INTEGERS) {
+        assert.throws(() => { hyperparameters.numberTrainingStories = value; }, RangeError, `numberTrainingStories accepted ${value}`);
+        assert.throws(() => { hyperparameters.numberValidationStories = value; }, RangeError, `numberValidationStories accepted ${value}`);
+    }
+    assert.equal(hyperparameters.numberTrainingStories, 1000);
+    assert.equal(hyperparameters.numberValidationStories, 100);
+});
+test("the constructor rejects invalid story counts", () => {
+    // Arguments 22 and 23 are numberTrainingStories and numberValidationStories.
+    const build = (numberTrainingStories, numberValidationStories) => new Hyperparameters(768, 12, 0.1, Hyperparameters.TRAINING_MODE, 12, 12, 2, false, true, 0.01, 0.02, 0.02, 0.02, 2, 0.9, 1, 0.0004, 0.9, 0.999, 1e-8, 0.1, numberTrainingStories, numberValidationStories);
+    assert.doesNotThrow(() => build(10, 2));
+    assert.throws(() => build(0, 2), RangeError);
+    assert.throws(() => build(10, 1.5), RangeError);
 });
 test("the constructor rejects invalid optimizer hyperparameters", () => {
     // Arguments 17 to 21 are learningRate, beta1, beta2, optimizerEpsilon and weightDecay.

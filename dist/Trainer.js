@@ -3,6 +3,7 @@ import BPETokenizer from "./BPETokenizer.js";
 import Hyperparameters from "./Hyperparameters.js";
 import { crossEntropyLoss, crossEntropyErrors } from "./Loss.js";
 import AdamW from "./AdamW.js";
+import { readCsvColumn } from "./CsvReader.js";
 import DEBUG from "./Debug.js";
 /**
  * Loads training data and trains the model on it, following the book's
@@ -44,6 +45,20 @@ class Trainer {
      */
     optimizer;
     /**
+     * The number of TinyStories training stories loaded so far by
+     * loadTinyStories(). The next call starts after them, so each training
+     * run sees new stories.
+     */
+    _tinyStoriesLoaded = 0;
+    /**
+     * The number of TinyStories training stories loaded so far by
+     * loadTinyStories(), across every call. The next call loads the stories
+     * that follow these in the training file.
+     */
+    get tinyStoriesLoaded() {
+        return this._tinyStoriesLoaded;
+    }
+    /**
      * Creates a Trainer for the given model, building its own tokenizer and
      * AdamW optimizer. The model is passed in rather than built here so that
      * the same instance can be shared with a Generator, which then generates
@@ -59,25 +74,140 @@ class Trainer {
         this.optimizer = new AdamW(hyperparameters);
     }
     /**
-     * Reads the given file, splits its text into a training part and a
-     * validation part, and encodes each part with the BPE tokenizer, replacing
+     * Reads one or more text files, splits each into a training part and a
+     * validation part, and encodes the parts with the BPE tokenizer, replacing
      * any previously loaded tokens.
      *
-     * As in the book, the text is split by characters before it is tokenized:
-     * the first trainingRatio of the characters are used for training and the
-     * rest for validation.
+     * As in the book, each file's text is split by characters before it is
+     * tokenized: its first trainingRatio of the characters are used for
+     * training and the rest for validation. Each file is split separately,
+     * rather than joining the files and splitting once, so the validation set
+     * contains a sample of every file, not just the end of the last one.
      *
-     * @param filePath - Path to the UTF-8 text file to load.
+     * The training parts of the files are then joined, in the order given,
+     * with the <|endoftext|> token between them, and so are the validation
+     * parts. This is how GPT-2 marks the boundaries between documents: the
+     * model learns that the text after the token is unrelated to the text
+     * before it, rather than learning that one book runs on into the next.
+     * With a single file no token is added, so the result is the same as
+     * loading that file on its own.
+     *
+     * @param filePaths - Path to a UTF-8 text file, or an array of paths.
+     * @throws Error if filePaths is an empty array.
      */
-    load(filePath) {
-        const text = fs.readFileSync(filePath, "utf-8");
-        const splitIndex = Math.floor(this.hyperparameters.trainingRatio * text.length);
-        this.trainingTokens = this.tokenizer.encode(text.slice(0, splitIndex));
-        this.validationTokens = this.tokenizer.encode(text.slice(splitIndex));
-        if (DEBUG.TRAINER) {
-            console.log(`Trainer| File loaded. Characters: ${text.length}. ` +
+    load(filePaths) {
+        const paths = typeof filePaths === "string" ? [filePaths] : filePaths;
+        if (paths.length === 0) {
+            throw new Error("Trainer| load() needs at least one file");
+        }
+        // The training and validation parts of each file, as token ids.
+        const trainingParts = [];
+        const validationParts = [];
+        for (const filePath of paths) {
+            const text = fs.readFileSync(filePath, "utf-8");
+            const splitIndex = Math.floor(this.hyperparameters.trainingRatio * text.length);
+            trainingParts.push(this.tokenizer.encode(text.slice(0, splitIndex)));
+            validationParts.push(this.tokenizer.encode(text.slice(splitIndex)));
+            if (DEBUG.TRAINER) {
+                console.log(`Trainer| Loaded ${filePath}. Characters: ${text.length}. ` +
+                    `Training tokens: ${trainingParts[trainingParts.length - 1].length}. ` +
+                    `Validation tokens: ${validationParts[validationParts.length - 1].length}.`);
+            }
+        }
+        this.trainingTokens = this.joinDocuments(trainingParts);
+        this.validationTokens = this.joinDocuments(validationParts);
+        if (DEBUG.TRAINER && paths.length > 1) {
+            console.log(`Trainer| ${paths.length} files loaded. ` +
                 `Training tokens: ${this.trainingTokens.length}. Validation tokens: ${this.validationTokens.length}.`);
         }
+    }
+    /**
+     * Loads stories from the TinyStories dataset (Eldan and Li, 2023), ready
+     * for training in the same way as load(): the training and validation
+     * tokens are replaced, and train() then uses them.
+     *
+     * TinyStories is a large collection of short children's stories, written
+     * with a small vocabulary so that small models can learn to write coherent
+     * English. It comes as two CSV files with a "text" column holding one story
+     * per record. Unlike load(), nothing is split off for validation: the
+     * dataset already has a separate validation file.
+     *
+     * Each call loads the next numberTrainingStories stories of the training
+     * file: the first call loads the first ones, and each later call starts
+     * where the previous one finished (see tinyStoriesLoaded). This way every
+     * training run sees new stories, which teaches the model more than seeing
+     * the same ones again. Validation always uses the first
+     * numberValidationStories of the validation file, so that the validation
+     * losses of different runs can be compared. Only the stories needed are
+     * read, so the training file (nearly 2 GB) is never loaded in full. Each
+     * story is encoded separately, and the stories are joined with the
+     * <|endoftext|> token between them, as load() joins files: the model
+     * learns that each story is separate.
+     *
+     * If a file has fewer stories than requested (for the training file, fewer
+     * still unused), all of them are used and a warning is printed.
+     *
+     * @param trainingFilePath - Path to the TinyStories training CSV file, e.g. data/TinyStories_train.csv.
+     * @param validationFilePath - Path to the TinyStories validation CSV file, e.g. data/TinyStories_validation.csv.
+     * @throws Error if either file has no "text" column.
+     */
+    loadTinyStories(trainingFilePath, validationFilePath) {
+        // The training stories continue from where the last call finished; the validation stories are always the same.
+        const firstStory = this._tinyStoriesLoaded;
+        const trainingStories = this.readStories(trainingFilePath, firstStory, this.hyperparameters.numberTrainingStories);
+        const validationStories = this.readStories(validationFilePath, 0, this.hyperparameters.numberValidationStories);
+        this._tinyStoriesLoaded += trainingStories.length;
+        this.trainingTokens = this.joinDocuments(trainingStories.map((story) => this.tokenizer.encode(story)));
+        this.validationTokens = this.joinDocuments(validationStories.map((story) => this.tokenizer.encode(story)));
+        if (DEBUG.TRAINER) {
+            console.log(`Trainer| TinyStories loaded. Training stories: ${trainingStories.length}, ` +
+                `numbers ${firstStory + 1} to ${firstStory + trainingStories.length} (${this.trainingTokens.length} tokens). ` +
+                `Validation stories: ${validationStories.length} (${this.validationTokens.length} tokens).`);
+        }
+    }
+    /**
+     * Reads stories from a TinyStories CSV file, warning if it has fewer than
+     * requested.
+     *
+     * @param filePath - Path to the CSV file.
+     * @param skipStories - The number of stories at the start of the file to skip.
+     * @param numberStories - The number of stories to read after them.
+     * @returns The stories, in file order.
+     */
+    readStories(filePath, skipStories, numberStories) {
+        const stories = readCsvColumn(filePath, "text", numberStories, skipStories);
+        if (stories.length < numberStories) {
+            const position = skipStories > 0 ? ` after the first ${skipStories}` : "";
+            console.warn(`Trainer| ${filePath} has only ${stories.length} stories${position}; ${numberStories} were requested.`);
+        }
+        return stories;
+    }
+    /**
+     * Joins documents (files or stories), already encoded as token ids, into
+     * one list, with the <|endoftext|> token between each document and the
+     * next. This is how GPT-2 marks the boundaries between documents: the
+     * model learns that the text after the token is unrelated to the text
+     * before it. A single document is returned unchanged, with no token added.
+     *
+     * @param documents - The token ids of each document, in order.
+     * @returns The joined token ids.
+     */
+    joinDocuments(documents) {
+        const tokens = [];
+        for (let i = 0; i < documents.length; i++) {
+            if (i > 0) {
+                tokens.push(this.tokenizer.endOfTextId);
+            }
+            /*
+             * Appended with a loop rather than push(...document), because spreading
+             * a whole book's tokens as arguments can exceed the engine's argument
+             * limit.
+             */
+            for (const token of documents[i]) {
+                tokens.push(token);
+            }
+        }
+        return tokens;
     }
     /**
      * Trains the model for numberEpochs epochs over the training set. In each

@@ -18,14 +18,14 @@ const model = new GPTModel(hyperparameters);
 //Build generator
 const generator = new Generator(hyperparameters, model);
 //Test text
-const text = "It was not till three years later";
+const text = "Once upon a time";
 //Output completion before model is trained.
 //Call generator to build text
 let generatedText = generator.generate(text);
 console.log(`Generated text before training: "${generatedText}".`);
 // Train model
 const trainer = new Trainer(hyperparameters, model);
-trainer.load(filePath);
+trainer.loadTinyStories("data/TinyStories_train.csv", "data/TinyStories_validation.csv");
 trainer.train();
 //Output completion after model is trained.
 //Call generator to build text

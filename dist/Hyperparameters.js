@@ -52,6 +52,8 @@ class Hyperparameters {
     _beta2;
     _optimizerEpsilon;
     _weightDecay;
+    _numberTrainingStories;
+    _numberValidationStories;
     _seed;
     /**
      * The random number stream shared by every component built from this
@@ -142,6 +144,16 @@ class Hyperparameters {
      * each step, which discourages large weights and so reduces overfitting.
      * Defaults to 0.1, the book's value (dnn uses 0.01). Must be a finite
      * number greater than or equal to 0.
+     * @param numberTrainingStories - The number of stories from the
+     * TinyStories training data to train on. Defaults to 1000: TinyStories
+     * averages about 210 tokens per story, and the first 1000 come to 235,419
+     * tokens, roughly 2.5 hours per epoch with forReducedTraining(). Must be a
+     * positive whole number.
+     * @param numberValidationStories - The number of stories from the
+     * TinyStories validation data to measure the validation loss on. Defaults
+     * to 100 (17,266 tokens): enough for a steady measurement, while taking
+     * only a few minutes at the end of each epoch. Must be a positive whole
+     * number.
      * @param seed - Optional PRNG seed for the random number stream returned
      * by random(), which every component uses for weight initialization,
      * dropout and decoding. When provided, the same seed always produces the
@@ -165,10 +177,11 @@ class Hyperparameters {
      * @throws RangeError if learningRate or optimizerEpsilon is not a finite number greater than 0.
      * @throws RangeError if beta1 or beta2 is not at least 0 and less than 1.
      * @throws RangeError if weightDecay is negative, infinite or NaN.
+     * @throws RangeError if numberTrainingStories or numberValidationStories is not a positive whole number.
      */
     constructor(embeddingSize = 768, //GPT-2 uses 768
     contextLength = 1024, //GPT-2 uses 1024
-    dropoutRate = 0.1, mode = Hyperparameters.TRAINING_MODE, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = true, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, linearLayerStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, trainingRatio = 0.9, numberEpochs = 1, learningRate = 0.0004, beta1 = 0.9, beta2 = 0.999, optimizerEpsilon = 1e-8, weightDecay = 0.1, seed) {
+    dropoutRate = 0.1, mode = Hyperparameters.TRAINING_MODE, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = true, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, linearLayerStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, trainingRatio = 0.9, numberEpochs = 1, learningRate = 0.0004, beta1 = 0.9, beta2 = 0.999, optimizerEpsilon = 1e-8, weightDecay = 0.1, numberTrainingStories = 1000, numberValidationStories = 100, seed) {
         Hyperparameters.validatePositiveInteger("contextLength", contextLength);
         Hyperparameters.validateDropoutRate(dropoutRate);
         Hyperparameters.validateMode(mode);
@@ -188,6 +201,8 @@ class Hyperparameters {
         Hyperparameters.validateBeta("beta2", beta2);
         Hyperparameters.validatePositiveNumber("optimizerEpsilon", optimizerEpsilon);
         Hyperparameters.validateWeightDecay(weightDecay);
+        Hyperparameters.validatePositiveInteger("numberTrainingStories", numberTrainingStories);
+        Hyperparameters.validatePositiveInteger("numberValidationStories", numberValidationStories);
         this._embeddingSize = embeddingSize;
         this._contextLength = contextLength;
         this._vocabularySize = new BPETokenizer().vocabularySize;
@@ -211,68 +226,112 @@ class Hyperparameters {
         this._beta2 = beta2;
         this._optimizerEpsilon = optimizerEpsilon;
         this._weightDecay = weightDecay;
+        this._numberTrainingStories = numberTrainingStories;
+        this._numberValidationStories = numberValidationStories;
         this._seed = seed;
         this._random = Hyperparameters.createRandom(seed);
     }
     /**
-     * Creates Hyperparameters for a model small enough to train on
-     * data/the-verdict.txt in a few hours, as a demonstration that the model
-     * learns. The defaults, GPT-2 small, are far too slow to train in plain
-     * TypeScript, and their context length of 1024 is longer than the
-     * validation part of the-verdict.txt (547 tokens), so no validation window
-     * could be made from it.
+     * The number of tokens the model trains on per hour, on a laptop, with
+     * forReducedTraining()'s settings at embeddingSize 64. Measured; at other
+     * widths it scales as 1 / embeddingSize (see forReducedTraining).
+     */
+    static TOKENS_PER_HOUR_AT_WIDTH_64 = 187000;
+    /** The average number of tokens in a TinyStories story. Measured over 2,000 stories. */
+    static TOKENS_PER_STORY = 210;
+    /** The training time, in hours, from which forReducedTraining() uses the wider model (see forReducedTraining). */
+    static WIDER_MODEL_HOURS = 20;
+    /** The fewest stories forReducedTraining() trains on, however short the time: enough for a few batches. */
+    static MINIMUM_TRAINING_STORIES = 10;
+    /**
+     * Creates Hyperparameters for a model small enough to train on TinyStories
+     * (see Trainer.loadTinyStories) in roughly the given number of hours, as a
+     * demonstration that the model learns to write English. The defaults,
+     * GPT-2 small, are far too slow to train in plain TypeScript.
      *
-     * Compared with GPT-2 small:
-     * - embeddingSize 128 instead of 768. Most of the training time is spent
-     *   on the vocabulary: the output layer and the token embedding each have
-     *   50,257 rows of embeddingSize values, so their cost grows in proportion
-     *   to embeddingSize.
-     * - numberAttentionHeads 4, so each head works with 32 values (GPT-2
-     *   small uses 64).
+     * TinyStories has far more text than can be trained on in a few hours, so
+     * every story is seen once: there is one epoch, and the training time is
+     * set by numberTrainingStories. The hours decide two things: how many
+     * stories to train on, and how wide the model should be.
+     *
+     * How many stories. Training time is proportional to the number of tokens
+     * trained on. At embeddingSize 64 the model trains on about 187,000 tokens
+     * an hour, and stories average about 210 tokens, so it gets through about
+     * 890 stories an hour:
+     *
+     *     numberTrainingStories = hours x tokens per hour / 210
+     *
+     * How wide. Most of the training time is spent on the vocabulary: the
+     * output layer and the token embedding each have 50,257 rows of
+     * embeddingSize values, so the tokens trained on per hour fall in
+     * proportion to embeddingSize (measured: about 187,000 at 64 and 95,000 at
+     * 128). In every equal-time comparison made, the narrower model won,
+     * because it saw more text. Four configurations trained for about 40
+     * minutes each gave these validation losses:
+     *
+     *     embeddingSize 128, learning rate 0.001, dropout 0.1:   4.84
+     *     embeddingSize 128, learning rate 0.002, no dropout:    4.85
+     *     embeddingSize 64,  learning rate 0.002, no dropout:    4.61  (twice as many stories)
+     *     embeddingSize 128, contextLength 256:                  4.98
+     *
+     * and on the-verdict.txt, embeddingSize 128 got much further in a few
+     * hours than 256. A wider model only pays off once the narrow one has had
+     * as much text as it can usefully learn from. The usual rule of thumb
+     * (Hoffmann et al.'s "Chinchilla" study) is about 20 tokens per parameter,
+     * counting the parameters in the transformer blocks rather than the
+     * vocabulary: about 200,000 at embeddingSize 64, so about 4 million tokens,
+     * which takes about 20 hours. So the model is 64 wide below 20 hours and
+     * 128 wide from 20 hours on. This switch point is an estimate from the
+     * rule of thumb, not a measurement: no run that long was made.
+     *
+     * The other settings, compared with GPT-2 small:
+     * - numberAttentionHeads 4, so each head works with 16 values at width 64
+     *   or 32 at width 128 (GPT-2 small uses 64).
      * - numberTransformerBlocks 4 instead of 12.
-     * - contextLength 128 instead of 1024. Shorter windows are cheaper, give
-     *   more windows (and so more weight updates) per epoch, and fit in the
-     *   validation set. The book reduces it to 256 for the same reasons.
-     * - learningRate 0.001 instead of the book's 0.0004: a smaller model
-     *   tolerates, and needs, larger steps.
-     * - numberEpochs 50, and outputLength 50, so generated samples are long
+     * - contextLength 128 instead of 1024. Shorter windows give more weight
+     *   updates for the same amount of text. Stories average about 210 tokens,
+     *   so some are split between windows.
+     * - dropoutRate 0 instead of 0.1. Dropout reduces overfitting when the same
+     *   text is seen again and again; here no story is repeated, so it would
+     *   only slow learning down.
+     * - learningRate 0.002 at width 64 and 0.001 at width 128, instead of the
+     *   book's 0.0004: smaller models tolerate, and need, larger steps. These
+     *   are the rates used in the experiments at each width.
+     * - numberEpochs 1, and outputLength 50 so generated samples are long
      *   enough to judge.
      *
-     * Everything else (dropout 0.1, biases, weight initialization, batchSize
-     * 2, the other AdamW settings) keeps its default.
+     * Everything else (biases, weight initialization, batchSize 2, the other
+     * AdamW settings, numberValidationStories 100) keeps its default.
      *
-     * These values were chosen by training on the-verdict.txt. The model has
-     * about 14 million parameters, and each epoch takes about 3 minutes on a
-     * laptop, so 50 epochs take about 2.5 hours. In a test run the training
-     * loss fell from 9.8 after the first epoch to 3.2 after 12, and samples
-     * changed from "Every effort moves you." through repeated commas to
-     * "Every effort moves you know his pictures--I had been my dear I had
-     * been...". A larger model (embeddingSize 256, 8 heads) took over twice as
-     * long per epoch and was still only repeating "the" and commas after 5
-     * epochs, so within a few hours a smaller model gets further.
+     * The times are for the laptop the measurements were made on; a faster or
+     * slower computer will take proportionally less or more time.
      *
-     * The text is only about 5,000 tokens long, so the model mostly learns to
-     * reproduce it: generated text becomes recognisably like the story, as in
-     * the book's chapter 5, rather than general English. The validation loss
-     * stops falling after about 8 epochs and then rises slowly, which is
-     * overfitting, as the book also shows.
-     *
+     * @param hours - The rough number of hours to train for. Defaults to 2.5. Must be a finite number greater than 0.
      * @returns A new Hyperparameters instance, in TRAINING_MODE, with no seed.
+     * @throws RangeError if hours is not a finite number greater than 0.
      */
-    static forReducedTraining() {
+    static forReducedTraining(hours = 2.5) {
+        Hyperparameters.validatePositiveNumber("hours", hours);
         const hyperparameters = new Hyperparameters();
+        // Below WIDER_MODEL_HOURS the narrow model learns more in the time; from then on the wider one does (see above).
+        const embeddingSize = hours < Hyperparameters.WIDER_MODEL_HOURS ? 64 : 128;
         /*
          * The number of heads is set before the embedding size because each
          * setter checks that the embedding divides evenly between the heads:
-         * 768 / 4 and 128 / 4 are both whole numbers, but 128 / 12 is not.
+         * 768, 64 and 128 are all divisible by 4, but 64 is not divisible by 12.
          */
         hyperparameters.numberAttentionHeads = 4;
-        hyperparameters.embeddingSize = 128;
+        hyperparameters.embeddingSize = embeddingSize;
         hyperparameters.numberTransformerBlocks = 4;
         hyperparameters.contextLength = 128;
-        hyperparameters.learningRate = 0.001;
-        hyperparameters.numberEpochs = 50;
+        hyperparameters.dropoutRate = 0;
+        hyperparameters.learningRate = embeddingSize === 64 ? 0.002 : 0.001;
+        hyperparameters.numberEpochs = 1;
         hyperparameters.outputLength = 50;
+        // The tokens trained on per hour fall in proportion to the width; enough stories to fill the time.
+        const tokensPerHour = Hyperparameters.TOKENS_PER_HOUR_AT_WIDTH_64 * (64 / embeddingSize);
+        const stories = Math.round((hours * tokensPerHour) / Hyperparameters.TOKENS_PER_STORY);
+        hyperparameters.numberTrainingStories = Math.max(Hyperparameters.MINIMUM_TRAINING_STORIES, stories);
         return hyperparameters;
     }
     /**
@@ -657,6 +716,28 @@ class Hyperparameters {
     set weightDecay(weightDecay) {
         Hyperparameters.validateWeightDecay(weightDecay);
         this._weightDecay = weightDecay;
+    }
+    /**
+     * The number of stories from the TinyStories training data to train on.
+     * TinyStories averages about 210 tokens per story, so training time grows
+     * by roughly 1 hour per 450 stories with forReducedTraining().
+     */
+    get numberTrainingStories() {
+        return this._numberTrainingStories;
+    }
+    /** @throws RangeError if numberTrainingStories is not a positive whole number. */
+    set numberTrainingStories(numberTrainingStories) {
+        Hyperparameters.validatePositiveInteger("numberTrainingStories", numberTrainingStories);
+        this._numberTrainingStories = numberTrainingStories;
+    }
+    /** The number of stories from the TinyStories validation data to measure the validation loss on. */
+    get numberValidationStories() {
+        return this._numberValidationStories;
+    }
+    /** @throws RangeError if numberValidationStories is not a positive whole number. */
+    set numberValidationStories(numberValidationStories) {
+        Hyperparameters.validatePositiveInteger("numberValidationStories", numberValidationStories);
+        this._numberValidationStories = numberValidationStories;
     }
     /**
      * Optional PRNG seed for the random number stream returned by random().

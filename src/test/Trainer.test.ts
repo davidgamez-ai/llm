@@ -187,6 +187,165 @@ test("training on short, repetitive text drives the loss far below that of an un
   assert.ok(losses[losses.length - 1].validationLoss < 3, `final validation loss ${losses[losses.length - 1].validationLoss}`);
 });
 
+/** Reads the trainer's private token arrays, to check what load() produced. */
+const loadedTokens = (trainer: Trainer) =>
+  trainer as unknown as { trainingTokens: number[]; validationTokens: number[] };
+
+/** The tokens of the training and validation parts of one text, split 90/10 by characters. */
+const split = (text: string) => {
+  const tokenizer = new BPETokenizer();
+  const splitIndex = Math.floor(0.9 * text.length);
+  return { training: tokenizer.encode(text.slice(0, splitIndex)), validation: tokenizer.encode(text.slice(splitIndex)) };
+};
+
+test("load() with several files splits each file 90/10 and joins the parts with <|endoftext|>", () => {
+  const first = sentences(30);
+  const second = "A different book about other things, which goes on for a while. ".repeat(20);
+  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
+  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+  const endOfText = new BPETokenizer().endOfTextId;
+
+  trainer.load([writeTempFile(first), writeTempFile(second)]);
+
+  // Each set holds the matching part of every file, in order, separated by the end-of-text token.
+  const a = split(first);
+  const b = split(second);
+  assert.deepEqual(loadedTokens(trainer).trainingTokens, [...a.training, endOfText, ...b.training]);
+  assert.deepEqual(loadedTokens(trainer).validationTokens, [...a.validation, endOfText, ...b.validation]);
+});
+
+test("load() gives the same tokens for one path as for an array holding that path", () => {
+  const filePath = writeTempFile(TEXT);
+  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
+  const single = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+  const array = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+
+  single.load(filePath);
+  array.load([filePath]);
+
+  assert.deepEqual(loadedTokens(array).trainingTokens, loadedTokens(single).trainingTokens);
+  assert.deepEqual(loadedTokens(array).validationTokens, loadedTokens(single).validationTokens);
+  // And no end-of-text token is added for a single file.
+  assert.deepEqual(loadedTokens(single).trainingTokens, split(TEXT).training);
+});
+
+test("load() replaces previously loaded tokens", () => {
+  const { trainer } = setUp();
+
+  trainer.load(writeTempFile(sentences(10)));
+
+  assert.deepEqual(loadedTokens(trainer).trainingTokens, split(sentences(10)).training);
+});
+
+test("load() rejects an empty array of files", () => {
+  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
+  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+
+  assert.throws(() => trainer.load([]), /at least one file/);
+});
+
+/** Writes a CSV file in the TinyStories format: a "text" column with one quoted story per record. */
+const writeStoriesCsv = (stories: string[]): string =>
+  writeTempFile("text\n" + stories.map((story) => `"${story.replace(/"/g, '""')}"`).join("\n") + "\n");
+
+/** Builds count numbered stories, each containing a quote and a line break as real TinyStories do. */
+const makeStories = (count: number, label: string): string[] =>
+  Array.from({ length: count }, (_, i) => `${label} story ${i}. Tom said, "Hello ${i}!"\n\nThe end.`);
+
+test("loadTinyStories() loads the first numberTrainingStories and numberValidationStories, joined with <|endoftext|>", () => {
+  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
+  hyperparameters.numberTrainingStories = 3;
+  hyperparameters.numberValidationStories = 2;
+  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+  const trainingStories = makeStories(5, "Training");
+  const validationStories = makeStories(4, "Validation");
+  const tokenizer = new BPETokenizer();
+  const endOfText = tokenizer.endOfTextId;
+
+  trainer.loadTinyStories(writeStoriesCsv(trainingStories), writeStoriesCsv(validationStories));
+
+  // Only the first 3 and 2 stories, each encoded separately, with the end-of-text token between them.
+  const [t0, t1, t2] = trainingStories.map((story) => tokenizer.encode(story));
+  const [v0, v1] = validationStories.map((story) => tokenizer.encode(story));
+  assert.deepEqual(loadedTokens(trainer).trainingTokens, [...t0, endOfText, ...t1, endOfText, ...t2]);
+  assert.deepEqual(loadedTokens(trainer).validationTokens, [...v0, endOfText, ...v1]);
+});
+
+test("each loadTinyStories() call continues with the next training stories, but always uses the same validation stories", () => {
+  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
+  hyperparameters.numberTrainingStories = 2;
+  hyperparameters.numberValidationStories = 1;
+  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+  const trainingStories = makeStories(6, "Training");
+  const trainingFile = writeStoriesCsv(trainingStories);
+  const validationFile = writeStoriesCsv(makeStories(3, "Validation"));
+  const tokenizer = new BPETokenizer();
+  const endOfText = tokenizer.endOfTextId;
+  const [t0, t1, t2, t3] = trainingStories.map((story) => tokenizer.encode(story));
+
+  assert.equal(trainer.tinyStoriesLoaded, 0);
+  trainer.loadTinyStories(trainingFile, validationFile);
+  const firstValidation = [...loadedTokens(trainer).validationTokens];
+  assert.deepEqual(loadedTokens(trainer).trainingTokens, [...t0, endOfText, ...t1]);
+  assert.equal(trainer.tinyStoriesLoaded, 2);
+
+  trainer.loadTinyStories(trainingFile, validationFile);
+  assert.deepEqual(loadedTokens(trainer).trainingTokens, [...t2, endOfText, ...t3]);
+  assert.deepEqual(loadedTokens(trainer).validationTokens, firstValidation);
+  assert.equal(trainer.tinyStoriesLoaded, 4);
+});
+
+test("loadTinyStories() warns when the training file runs out of new stories", (t) => {
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (message: string) => warnings.push(message));
+  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
+  hyperparameters.numberTrainingStories = 2;
+  hyperparameters.numberValidationStories = 1;
+  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+  const trainingFile = writeStoriesCsv(makeStories(3, "Training"));
+  const validationFile = writeStoriesCsv(makeStories(1, "Validation"));
+
+  trainer.loadTinyStories(trainingFile, validationFile);
+  trainer.loadTinyStories(trainingFile, validationFile);
+
+  // Only story 3 was left for the second call.
+  assert.equal(trainer.tinyStoriesLoaded, 3);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /only 1 stories after the first 2; 2 were requested/);
+});
+
+test("loadTinyStories() uses every story, with a warning, when a file has fewer than requested", (t) => {
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (message: string) => warnings.push(message));
+  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
+  hyperparameters.numberTrainingStories = 10;
+  hyperparameters.numberValidationStories = 1;
+  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+  const endOfText = new BPETokenizer().endOfTextId;
+
+  trainer.loadTinyStories(writeStoriesCsv(makeStories(2, "Training")), writeStoriesCsv(makeStories(3, "Validation")));
+
+  // Two training stories means exactly one end-of-text token; one validation story means none.
+  assert.equal(loadedTokens(trainer).trainingTokens.filter((token) => token === endOfText).length, 1);
+  assert.equal(loadedTokens(trainer).validationTokens.filter((token) => token === endOfText).length, 0);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /only 2 stories; 10 were requested/);
+});
+
+test("after loadTinyStories(), train() trains on the stories", () => {
+  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.GENERATION_MODE, 2, 1, 3);
+  hyperparameters.numberTrainingStories = 6;
+  hyperparameters.numberValidationStories = 2;
+  hyperparameters.seed = 42;
+  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+  trainer.loadTinyStories(writeStoriesCsv(makeStories(6, "Training")), writeStoriesCsv(makeStories(2, "Validation")));
+
+  const losses = trainer.train();
+
+  assert.equal(losses.length, 1);
+  assert.ok(Number.isFinite(losses[0].trainingLoss) && Number.isFinite(losses[0].validationLoss));
+});
+
 test("train() throws a clear error when there is not enough text for one batch", () => {
   const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
   const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));

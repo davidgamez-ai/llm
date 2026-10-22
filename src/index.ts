@@ -23,7 +23,7 @@ const model:GPTModel = new GPTModel(hyperparameters);
 const generator: Generator = new Generator(hyperparameters, model);
 
 //Test text
-const text:string = "It was not till three years later";
+const text:string = "Once upon a time";
 
 //Output completion before model is trained.
 //Call generator to build text
@@ -32,7 +32,7 @@ console.log(`Generated text before training: "${generatedText}".`);
 
 // Train model
 const trainer:Trainer = new Trainer(hyperparameters, model);
-trainer.load(filePath);
+trainer.loadTinyStories("data/TinyStories_train.csv", "data/TinyStories_validation.csv");
 trainer.train();
 
 //Output completion after model is trained.
