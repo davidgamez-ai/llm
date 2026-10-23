@@ -1,3 +1,4 @@
+import * as fs from "fs";
 import * as path from "path";
 import * as readline from "readline";
 import Hyperparameters from "./Hyperparameters.js";
@@ -5,17 +6,28 @@ import GPTModel from "./GPTModel.js";
 import Generator from "./Generator.js";
 import Trainer from "./Trainer.js";
 import BPETokenizer from "./BPETokenizer.js";
+import ModelManager from "./ModelManager.js";
 /**
  * An interactive console for training the model and trying it out. run()
- * shows a menu with two options:
+ * shows a menu with five options:
  *
  * 1. Train: asks how many hours to train for, then trains the model on
  *    TinyStories with Hyperparameters.forReducedTraining(hours).
- * 2. Chat: reads sentences typed by the user and shows how the model
+ * 2. Save model: asks for a file name and saves the model's weights and
+ *    hyperparameters there (see ModelManager), asking before overwriting an
+ *    existing file.
+ * 3. Load model: asks for a file name and replaces the current model with
+ *    the one saved there, asking first if the current model has training
+ *    that has not been saved.
+ * 4. Load GPT-2 small weights: replaces the current model with GPT-2 small,
+ *    with OpenAI's pretrained weights (see ModelManager.loadGPT2), asking
+ *    first in the same way as Load model.
+ * 5. Chat: reads sentences typed by the user and shows how the model
  *    continues each one, until the user types "quit", which returns to the
  *    menu.
  *
- * Typing "quit" at the menu ends the program.
+ * Typing "quit" at the menu ends the program, after asking for confirmation
+ * if the model has training that has not been saved, since it would be lost.
  *
  * The model, trainer and generator are shared, so chat always uses the
  * latest trained weights, and training again continues from where the last
@@ -27,8 +39,12 @@ import BPETokenizer from "./BPETokenizer.js";
  * Before any training the model's weights are random, so its replies are
  * random tokens.
  *
- * The trained weights are kept in memory only, so they are lost when the
- * program ends.
+ * A loaded model gets a new trainer, so training it again starts a new
+ * optimizer and starts again from the first story.
+ *
+ * File names typed for saving and loading are relative to the folder the
+ * program was started in, unless they are absolute; ".safetensors" is added
+ * if no extension is given.
  */
 class GPTConsole {
     /** The keyword that leaves chat, or the program when typed at the menu. */
@@ -41,6 +57,25 @@ class GPTConsole {
     static MAXIMUM_HOURS = 100;
     /** The hours used to build the model before any training has been chosen, so that chat works straight away. */
     static INITIAL_HOURS = 2.5;
+    /**
+     * The number of tokens GPT-2 small generates in each chat reply: enough
+     * for a sentence or two. The default Hyperparameters it is built with only
+     * generate 2. GPT-2 small takes over a second per token in this
+     * implementation, and each token takes a little longer than the last, since
+     * the whole sequence is run through the model again for every token (about
+     * 13 seconds for 10 tokens and 70 for 30), so 25 tokens take about a minute.
+     */
+    static GPT2_OUTPUT_LENGTH = 15;
+    /** The extension added to file names typed without one when saving or loading. */
+    static MODEL_EXTENSION = ".safetensors";
+    /** Characters Windows does not allow in file names (and control characters, which no system allows sensibly). */
+    static INVALID_FILE_NAME_CHARACTERS = /[<>:"|?*\x00-\x1f]/;
+    /** Saves and loads the model's weights. */
+    modelManager = new ModelManager();
+    /** The file the current model was loaded from, or null if it was built here. */
+    loadedFrom = null;
+    /** True if the model has been trained since it was built, loaded or last saved, so quitting or loading would lose training. */
+    unsavedTraining = false;
     /** Creates the hyperparameters for a number of hours of training. */
     hyperparametersForHours;
     /*
@@ -60,6 +95,8 @@ class GPTConsole {
     trainingFilePath;
     /** Path to the TinyStories validation CSV file. */
     validationFilePath;
+    /** Path to OpenAI's GPT-2 small weights. */
+    gpt2FilePath;
     /** Where the user's typing is read from. */
     input;
     /** Where menus and replies are written. */
@@ -87,6 +124,7 @@ class GPTConsole {
         const dataFolder = path.join(import.meta.dirname, "..", "data");
         this.trainingFilePath = options.trainingFilePath ?? path.join(dataFolder, "TinyStories_train.csv");
         this.validationFilePath = options.validationFilePath ?? path.join(dataFolder, "TinyStories_validation.csv");
+        this.gpt2FilePath = options.gpt2FilePath ?? ModelManager.GPT2_SMALL_FILE;
         this.input = options.input ?? process.stdin;
         this.output = options.output ?? process.stdout;
         this.buildModel(this.hyperparametersForHours(GPTConsole.INITIAL_HOURS));
@@ -106,18 +144,34 @@ class GPTConsole {
             let running = true;
             while (running) {
                 this.write("");
-                this.write(`Menu (the model has been trained ${this.trainingRuns} time${this.trainingRuns === 1 ? "" : "s"}):`);
+                const loaded = this.loadedFrom === null ? "" : ` since it was loaded from ${path.basename(this.loadedFrom)}`;
+                this.write(`Menu (the model has been trained ${this.trainingRuns} time${this.trainingRuns === 1 ? "" : "s"}${loaded}):`);
                 this.write("  1. Train");
-                this.write("  2. Chat");
-                const choice = await this.ask(`Choose 1 or 2 (or "${GPTConsole.QUIT}" to exit): `);
-                // train() and chat() return false if the input ended while they were asking for something, which also ends the program.
-                if (choice === null || choice.toLowerCase() === GPTConsole.QUIT) {
+                this.write("  2. Save model");
+                this.write("  3. Load model");
+                this.write("  4. Load GPT-2 small weights");
+                this.write("  5. Chat");
+                const choice = await this.ask(`Choose 1 to 5 (or "${GPTConsole.QUIT}" to exit): `);
+                // Each option, and confirmQuit(), returns false if the input ended while it was asking for something, which also ends the program.
+                if (choice === null) {
                     running = false;
+                }
+                else if (choice.toLowerCase() === GPTConsole.QUIT) {
+                    running = !(await this.confirmQuit());
                 }
                 else if (choice === "1") {
                     running = await this.train();
                 }
                 else if (choice === "2") {
+                    running = await this.saveModel();
+                }
+                else if (choice === "3") {
+                    running = await this.loadModel();
+                }
+                else if (choice === "4") {
+                    running = await this.loadGPT2();
+                }
+                else if (choice === "5") {
                     running = await this.chat();
                 }
                 else {
@@ -129,6 +183,26 @@ class GPTConsole {
         finally {
             lineReader.close();
         }
+    }
+    /**
+     * Checks that the user really wants to quit, if that would lose training:
+     * the weights are kept in memory until they are saved, so training that
+     * may have taken hours is lost when the program ends. If there is no
+     * unsaved training, the program quits without asking.
+     *
+     * @returns True to quit: there is no unsaved training, the user answered "y" or "yes", or the input ended. False to stay in the program.
+     */
+    async confirmQuit() {
+        if (!this.unsavedTraining) {
+            return true;
+        }
+        this.write(`The model has been trained ${this.trainingRuns} time${this.trainingRuns === 1 ? "" : "s"}, ` +
+            "and its training will be lost when the program ends. Choose 2 at the menu to save it.");
+        const answer = await this.ask("Quit anyway? (y/n): ");
+        if (answer === null) {
+            return true;
+        }
+        return GPTConsole.isYes(answer);
     }
     /**
      * Menu option 1: asks how many hours to train for, works out the
@@ -154,15 +228,15 @@ class GPTConsole {
             GPTConsole.copyTrainingSettings(planned, this.hyperparameters);
         }
         else {
-            // A model of a different size has to start again from random weights. Ask first if that would lose training.
-            if (this.trainingRuns > 0) {
+            // A model of a different size has to start again from random weights. Ask first if that would lose training or a loaded model.
+            if (this.trainingRuns > 0 || this.loadedFrom !== null) {
                 this.write(`Training for ${hours} hours needs a model ${planned.embeddingSize} values wide, but the current model is ` +
                     `${this.hyperparameters.embeddingSize} wide. A new model would start again from random weights, losing the current training.`);
                 const answer = await this.ask("Start a new model? (y/n): ");
                 if (answer === null) {
                     return false;
                 }
-                if (answer.toLowerCase() !== "y" && answer.toLowerCase() !== "yes") {
+                if (!GPTConsole.isYes(answer)) {
                     this.write("Training cancelled; the current model is unchanged.");
                     return true;
                 }
@@ -174,6 +248,7 @@ class GPTConsole {
             this.trainer.loadTinyStories(this.trainingFilePath, this.validationFilePath);
             const losses = this.trainer.train();
             this.trainingRuns++;
+            this.unsavedTraining = true;
             const last = losses[losses.length - 1];
             this.write(`Training finished. Training loss: ${last.trainingLoss.toFixed(3)}. Validation loss: ${last.validationLoss.toFixed(3)}.`);
         }
@@ -238,7 +313,253 @@ class GPTConsole {
         this.write(`Expected to finish at about ${finishTime}. The console is unavailable until then.`);
     }
     /**
-     * Menu option 2: reads sentences from the user and shows the model's
+     * Menu option 2: asks for a file name, checks it, and saves the model's
+     * weights and hyperparameters there, showing the progress. If a file
+     * already exists there the user is asked whether to overwrite it; if not,
+     * or if the file name cannot be used, the user is asked for another. If
+     * saving fails, the error is shown and the console returns to the menu.
+     *
+     * @returns True to return to the menu; false if the input ended, which ends the program.
+     */
+    async saveModel() {
+        if (this.trainingRuns === 0 && this.loadedFrom === null) {
+            this.write("(The model has not been trained yet, so the saved weights will be random.)");
+        }
+        let filePath;
+        for (;;) {
+            filePath = await this.askFilePath("save the model to", GPTConsole.checkSavePath);
+            if (filePath === undefined) {
+                return false;
+            }
+            if (filePath === null) {
+                this.write("Save cancelled.");
+                return true;
+            }
+            if (!fs.existsSync(filePath)) {
+                break;
+            }
+            // The file exists: only overwrite it if the user says so; otherwise ask for another name.
+            const answer = await this.ask(`A file already exists at ${filePath}. Overwrite it? (y/n): `);
+            if (answer === null) {
+                return false;
+            }
+            if (GPTConsole.isYes(answer)) {
+                break;
+            }
+            this.write("The existing file has not been changed.");
+        }
+        const megabytes = ((this.model.getParameterCount() * 4) / 1e6).toFixed(1);
+        this.write(`Saving the model (${(this.model.getParameterCount() / 1e6).toFixed(1)} million parameters, ${megabytes} MB) to ${filePath}`);
+        const start = Date.now();
+        try {
+            this.withProgress("Saved", (onProgress) => this.modelManager.save(this.model, filePath, onProgress));
+            this.unsavedTraining = false;
+            this.write(`Model saved in ${((Date.now() - start) / 1000).toFixed(1)} seconds.`);
+        }
+        catch (error) {
+            this.write(`Saving failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return true;
+    }
+    /**
+     * Menu option 3: asks for a file name, checks that there is a file there,
+     * and replaces the current model with the one saved in it (see
+     * replaceModel). If the file name cannot be used, the user is asked for
+     * another.
+     *
+     * @returns True to return to the menu; false if the input ended, which ends the program.
+     */
+    async loadModel() {
+        const filePath = await this.askFilePath("load the model from", GPTConsole.checkLoadPath);
+        if (filePath === undefined) {
+            return false;
+        }
+        if (filePath === null) {
+            this.write("Load cancelled.");
+            return true;
+        }
+        return this.replaceModel(filePath, "the model", (onProgress) => this.modelManager.loadModel(filePath, Hyperparameters.GENERATION_MODE, onProgress));
+    }
+    /**
+     * Menu option 4: replaces the current model with GPT-2 small, with
+     * OpenAI's pretrained weights read from gpt2FilePath (see replaceModel),
+     * and sets its replies to GPT2_OUTPUT_LENGTH tokens. If the weights have
+     * not been downloaded, says where to get them and returns to the menu.
+     *
+     * @returns True to return to the menu; false if the input ended, which ends the program.
+     */
+    async loadGPT2() {
+        if (!fs.existsSync(this.gpt2FilePath)) {
+            this.write(`The GPT-2 small weights were not found at ${this.gpt2FilePath}. Download them with:`);
+            this.write(`  curl.exe -L ${ModelManager.GPT2_SMALL_URL} -o "${this.gpt2FilePath}"`);
+            return true;
+        }
+        return this.replaceModel(this.gpt2FilePath, "GPT-2 small's weights", (onProgress) => {
+            const model = this.modelManager.loadGPT2(this.gpt2FilePath, Hyperparameters.GENERATION_MODE, onProgress);
+            model.hyperparameters.outputLength = GPTConsole.GPT2_OUTPUT_LENGTH;
+            return model;
+        }, `Chat replies will be ${GPTConsole.GPT2_OUTPUT_LENGTH} tokens long and take about a minute each, as GPT-2 small is large for plain TypeScript.`);
+    }
+    /**
+     * Replaces the current model with one loaded from a file, showing the
+     * progress. Shared by Load model and Load GPT-2 small weights. If the
+     * current model has training that has not been saved, the user is asked
+     * first, since loading would lose it. If loading fails (for example, the
+     * file is not a saved model), the error is shown, the current model is
+     * kept, and the console returns to the menu.
+     *
+     * @param filePath - The file being loaded, shown to the user and in the menu afterwards.
+     * @param description - What is being loaded, e.g. "the model", shown in the progress message.
+     * @param load - Loads the model, calling the progress callback it is given.
+     * @param note - Optional; shown after the model has loaded successfully.
+     * @returns True to return to the menu; false if the input ended, which ends the program.
+     */
+    async replaceModel(filePath, description, load, note) {
+        if (this.unsavedTraining) {
+            this.write(`The current model has been trained ${this.trainingRuns} time${this.trainingRuns === 1 ? "" : "s"} since it was last saved, ` +
+                "and its training will be lost if another model is loaded.");
+            const answer = await this.ask("Load anyway? (y/n): ");
+            if (answer === null) {
+                return false;
+            }
+            if (!GPTConsole.isYes(answer)) {
+                this.write("Load cancelled; the current model is unchanged.");
+                return true;
+            }
+        }
+        const megabytes = (fs.statSync(filePath).size / 1e6).toFixed(1);
+        this.write(`Loading ${description} from ${filePath} (${megabytes} MB)`);
+        const start = Date.now();
+        try {
+            const model = this.withProgress("Loaded", load);
+            this.useModel(model);
+            this.loadedFrom = filePath;
+            this.write(`Model loaded in ${((Date.now() - start) / 1000).toFixed(1)} seconds: ` +
+                `${(model.getParameterCount() / 1e6).toFixed(1)} million parameters, a model ${this.hyperparameters.embeddingSize} values wide ` +
+                `with ${this.hyperparameters.numberTransformerBlocks} transformer blocks.`);
+            if (note !== undefined) {
+                this.write(note);
+            }
+        }
+        catch (error) {
+            this.write(`Loading failed: ${error instanceof Error ? error.message : String(error)}`);
+            this.write("The current model is unchanged.");
+        }
+        return true;
+    }
+    /**
+     * Asks for the path of a model file, repeating the question until the
+     * check accepts the path. Relative paths are resolved from the folder the
+     * program was started in, surrounding quotes (as added by Windows' "Copy
+     * as path") are removed, and MODEL_EXTENSION is added if the name has no
+     * extension and nothing exists at it. An empty answer or "quit" cancels.
+     *
+     * @param action - What the file is for, shown in the question, e.g. "save the model to".
+     * @param check - Returns why a path cannot be used, or null if it can.
+     * @returns The full path; null if the user cancelled; undefined if the input ended.
+     */
+    async askFilePath(action, check) {
+        for (;;) {
+            const answer = await this.ask(`File to ${action}? (e.g. models/tiny${GPTConsole.MODEL_EXTENSION}; press Enter or type "${GPTConsole.QUIT}" to cancel): `);
+            if (answer === null) {
+                return undefined;
+            }
+            if (answer === "" || answer.toLowerCase() === GPTConsole.QUIT) {
+                return null;
+            }
+            // The extension is only added if nothing exists at the path as typed, so a folder's name is reported as a folder.
+            let filePath = path.resolve(answer.replace(/^"(.*)"$/, "$1"));
+            if (path.extname(filePath) === "" && !fs.existsSync(filePath)) {
+                filePath += GPTConsole.MODEL_EXTENSION;
+            }
+            const problem = check(filePath);
+            if (problem === null) {
+                return filePath;
+            }
+            this.write(`${problem} Please enter a different file name.`);
+        }
+    }
+    /**
+     * Checks whether a model can be saved at a path: its folder must exist
+     * and be writable, its name must be allowed, and it must not be a folder.
+     * An existing file is acceptable; the caller asks before overwriting it.
+     *
+     * @param filePath - The full path to check.
+     * @returns Why the path cannot be used, or null if it can.
+     */
+    static checkSavePath(filePath) {
+        const folder = path.dirname(filePath);
+        if (GPTConsole.INVALID_FILE_NAME_CHARACTERS.test(path.basename(filePath))) {
+            return `"${path.basename(filePath)}" contains characters that are not allowed in file names.`;
+        }
+        if (!fs.existsSync(folder)) {
+            return `The folder ${folder} does not exist.`;
+        }
+        if (!fs.statSync(folder).isDirectory()) {
+            return `${folder} is a file, not a folder.`;
+        }
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
+            return `${filePath} is a folder, not a file.`;
+        }
+        try {
+            fs.accessSync(folder, fs.constants.W_OK);
+        }
+        catch {
+            return `The folder ${folder} cannot be written to.`;
+        }
+        return null;
+    }
+    /**
+     * Checks whether a model can be loaded from a path: there must be a
+     * readable file there. Whether the file really is a saved model is only
+     * found out when it is loaded.
+     *
+     * @param filePath - The full path to check.
+     * @returns Why the path cannot be used, or null if it can.
+     */
+    static checkLoadPath(filePath) {
+        if (!fs.existsSync(filePath)) {
+            return `There is no file at ${filePath}.`;
+        }
+        if (fs.statSync(filePath).isDirectory()) {
+            return `${filePath} is a folder, not a file.`;
+        }
+        try {
+            fs.accessSync(filePath, fs.constants.R_OK);
+        }
+        catch {
+            return `${filePath} cannot be read.`;
+        }
+        return null;
+    }
+    /**
+     * Runs a save or load, showing its progress on one line in steps of 10%,
+     * e.g. "Saved: 10% 20% ... 100%". The line is always finished, even if the
+     * save or load fails part way.
+     *
+     * @param label - The word shown at the start of the line, e.g. "Saved".
+     * @param action - Does the saving or loading, calling the progress callback it is given.
+     * @returns Whatever action returns.
+     */
+    withProgress(label, action) {
+        this.output.write(`${label}:`);
+        let tenthsShown = 0;
+        try {
+            return action((bytesDone, bytesTotal) => {
+                // Large arrays (e.g. the token embedding) can cover several tenths at once, so each one passed is shown.
+                const tenths = bytesTotal === 0 ? 10 : Math.floor((bytesDone / bytesTotal) * 10);
+                while (tenthsShown < tenths) {
+                    tenthsShown++;
+                    this.output.write(` ${tenthsShown * 10}%`);
+                }
+            });
+        }
+        finally {
+            this.write("");
+        }
+    }
+    /**
+     * Menu option 5: reads sentences from the user and shows the model's
      * continuation of each, until the user types "quit". Empty lines are
      * ignored.
      *
@@ -246,7 +567,7 @@ class GPTConsole {
      */
     async chat() {
         this.write(`Chat: type the start of a sentence and the model will continue it. Type "${GPTConsole.QUIT}" to return to the menu.`);
-        if (this.trainingRuns === 0) {
+        if (this.trainingRuns === 0 && this.loadedFrom === null) {
             this.write("(The model has not been trained yet, so its replies will be random.)");
         }
         for (;;) {
@@ -286,13 +607,35 @@ class GPTConsole {
      * @param hyperparameters - The settings for the new model.
      */
     buildModel(hyperparameters) {
-        this.hyperparameters = hyperparameters;
         // The generator needs generation mode; the trainer switches to training mode while it trains and then switches back.
-        this.hyperparameters.mode = Hyperparameters.GENERATION_MODE;
-        this.model = new GPTModel(this.hyperparameters);
+        hyperparameters.mode = Hyperparameters.GENERATION_MODE;
+        this.useModel(new GPTModel(hyperparameters));
+    }
+    /**
+     * Makes a model the current one, with a new trainer and generator built
+     * from its hyperparameters, and resets the record of its training. Used
+     * for both newly built and loaded models; the caller sets loadedFrom for a
+     * loaded one.
+     *
+     * @param model - The model, in generation mode.
+     */
+    useModel(model) {
+        this.model = model;
+        this.hyperparameters = model.hyperparameters;
         this.trainer = new Trainer(this.hyperparameters, this.model);
         this.generator = new Generator(this.hyperparameters, this.model);
         this.trainingRuns = 0;
+        this.unsavedTraining = false;
+        this.loadedFrom = null;
+    }
+    /**
+     * Checks whether the user answered yes to a y/n question.
+     *
+     * @param answer - The answer typed.
+     * @returns True for "y" or "yes", in any case.
+     */
+    static isYes(answer) {
+        return answer.toLowerCase() === "y" || answer.toLowerCase() === "yes";
     }
     /**
      * Checks whether two sets of hyperparameters build models of the same

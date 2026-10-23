@@ -15,6 +15,8 @@ import DEBUG from "./Debug.js";
  * or for the last token only in generation mode.
  */
 class GPTModel {
+    /** The hyperparameters the model was built from, kept so they can be saved with its weights (see ModelManager). */
+    hyperparameters;
     /** Converts token ids into combined token and position embeddings. */
     embedding;
     /** Dropout applied to the embeddings (training mode only). Keeps its mask for backpropagation. */
@@ -37,6 +39,7 @@ class GPTModel {
      * @param hyperparameters - Source of numberTransformerBlocks, and passed on to Embedding, Dropout, each Transformer, LayerNormalization and LinearOutputLayer. Defaults to a new Hyperparameters instance.
      */
     constructor(hyperparameters = new Hyperparameters()) {
+        this.hyperparameters = hyperparameters;
         this.embedding = new Embedding(hyperparameters);
         this.embedding.build();
         this.embeddingDropout = new Dropout(hyperparameters);
@@ -173,6 +176,58 @@ class GPTModel {
             this.transformers.reduce((sum, transformer) => sum + transformer.getParameterCount(), 0) +
             this.finalLayerNormalization.getParameterCount() +
             this.linearOutputLayer.getParameterCount());
+    }
+    /**
+     * Lists every trainable parameter array in the model, each with a unique
+     * name and its shape, in a fixed order: the embeddings, then each
+     * transformer block in turn, then the final layer normalization and the
+     * linear output layer. Used by ModelManager to save and load the weights.
+     *
+     * The arrays returned are the ones the model uses, not copies, so values
+     * written into them change the model. Biases that are turned off (qkvBias
+     * or feedForwardBias false) are listed with length 0.
+     *
+     * @returns The model's parameter arrays, with their names and shapes.
+     */
+    getParameters() {
+        const parameters = [];
+        const addMatrix = (name, matrix) => {
+            parameters.push({ name, shape: [matrix.rows, matrix.columns], values: matrix.data });
+        };
+        const addVector = (name, values) => {
+            parameters.push({ name, shape: [values.length], values });
+        };
+        const addLayerNormalization = (name, layerNormalization) => {
+            addVector(`${name}.scale`, layerNormalization.scale);
+            addVector(`${name}.shift`, layerNormalization.shift);
+        };
+        addMatrix("embedding.token", this.embedding.textEmbeddingMatrix);
+        addMatrix("embedding.position", this.embedding.positionEmbeddingMatrix);
+        this.transformers.forEach((block, b) => {
+            const prefix = `transformers.${b}`;
+            addLayerNormalization(`${prefix}.attentionLayerNormalization`, block.attentionLayerNormalization);
+            const attention = block.multiHeadAttention;
+            attention.attentionHeads.forEach((head, h) => {
+                const headPrefix = `${prefix}.attention.heads.${h}`;
+                addMatrix(`${headPrefix}.query.weights`, head.queryWeights);
+                addVector(`${headPrefix}.query.biases`, head.queryBiases);
+                addMatrix(`${headPrefix}.key.weights`, head.keyWeights);
+                addVector(`${headPrefix}.key.biases`, head.keyBiases);
+                addMatrix(`${headPrefix}.value.weights`, head.valueWeights);
+                addVector(`${headPrefix}.value.biases`, head.valueBiases);
+            });
+            addMatrix(`${prefix}.attention.outputProjection.weights`, attention.outputProjectionWeights);
+            addVector(`${prefix}.attention.outputProjection.biases`, attention.outputProjectionBiases);
+            addLayerNormalization(`${prefix}.feedForwardLayerNormalization`, block.feedForwardLayerNormalization);
+            const feedForward = block.feedForward;
+            addMatrix(`${prefix}.feedForward.firstLayer.weights`, feedForward.firstLayerWeights);
+            addVector(`${prefix}.feedForward.firstLayer.biases`, feedForward.firstLayerBiases);
+            addMatrix(`${prefix}.feedForward.secondLayer.weights`, feedForward.secondLayerWeights);
+            addVector(`${prefix}.feedForward.secondLayer.biases`, feedForward.secondLayerBiases);
+        });
+        addLayerNormalization("finalLayerNormalization", this.finalLayerNormalization);
+        addMatrix("linearOutputLayer.weights", this.linearOutputLayer.weights);
+        return parameters;
     }
 }
 export default GPTModel;

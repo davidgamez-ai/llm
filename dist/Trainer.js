@@ -244,7 +244,7 @@ class Trainer {
                     const batchLoss = this.trainOnBatch(batches[batchIndex]);
                     totalBatchLoss += batchLoss;
                     if (DEBUG.TRAINER) {
-                        console.log(`Trainer| Epoch ${epoch}. Batch ${batchIndex + 1} of ${batches.length}. Loss: ${batchLoss}.`);
+                        console.log(`Trainer| Epoch ${epoch}. Batch ${batchIndex + 1} of ${batches.length}. Batch loss: ${batchLoss}.`);
                     }
                 }
                 const epochLoss = {

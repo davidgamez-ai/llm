@@ -2,6 +2,40 @@ import BPETokenizer from "./BPETokenizer.js";
 import createSeededRandom from "./SeededRandom.js";
 
 /**
+ * The settable values of a Hyperparameters instance, by their public names,
+ * as produced by Hyperparameters.toJSON() and read by fromJSON(). The
+ * derived values (vocabularySize and weightMatrixColumns) are left out, since
+ * they are calculated from the others.
+ */
+export interface HyperparameterValues {
+  embeddingSize: number;
+  contextLength: number;
+  dropoutRate: number;
+  mode: number;
+  numberAttentionHeads: number;
+  numberTransformerBlocks: number;
+  batchSize: number;
+  qkvBias: boolean;
+  feedForwardBias: boolean;
+  positionEmbeddingStandardDeviation: number;
+  tokenEmbeddingStandardDeviation: number;
+  linearLayerStandardDeviation: number;
+  outputLayerStandardDeviation: number;
+  outputLength: number;
+  trainingRatio: number;
+  numberEpochs: number;
+  learningRate: number;
+  beta1: number;
+  beta2: number;
+  optimizerEpsilon: number;
+  weightDecay: number;
+  numberTrainingStories: number;
+  numberValidationStories: number;
+  /** Left out when there is no seed. */
+  seed?: number;
+}
+
+/**
  * Central store for hyperparameters shared across multiple parts of the
  * application (e.g. Embedding), so that a single instance can be passed
  * around instead of each consumer redeclaring its own copies of the same
@@ -372,6 +406,99 @@ class Hyperparameters {
     hyperparameters.numberTrainingStories = Math.max(Hyperparameters.MINIMUM_TRAINING_STORIES, stories);
 
     return hyperparameters;
+  }
+
+  /**
+   * Lists the settable values by their public names, so they can be saved,
+   * e.g. with a model's weights (see ModelManager). Called automatically by
+   * JSON.stringify, which would otherwise write the private fields, with
+   * their underscores, and drop the random number stream.
+   *
+   * @returns Every settable value. seed is left out when it is not set.
+   */
+  toJSON(): HyperparameterValues {
+    return {
+      embeddingSize: this._embeddingSize,
+      contextLength: this._contextLength,
+      dropoutRate: this._dropoutRate,
+      mode: this._mode,
+      numberAttentionHeads: this._numberAttentionHeads,
+      numberTransformerBlocks: this._numberTransformerBlocks,
+      batchSize: this._batchSize,
+      qkvBias: this._qkvBias,
+      feedForwardBias: this._feedForwardBias,
+      positionEmbeddingStandardDeviation: this._positionEmbeddingStandardDeviation,
+      tokenEmbeddingStandardDeviation: this._tokenEmbeddingStandardDeviation,
+      linearLayerStandardDeviation: this._linearLayerStandardDeviation,
+      outputLayerStandardDeviation: this._outputLayerStandardDeviation,
+      outputLength: this._outputLength,
+      trainingRatio: this._trainingRatio,
+      numberEpochs: this._numberEpochs,
+      learningRate: this._learningRate,
+      beta1: this._beta1,
+      beta2: this._beta2,
+      optimizerEpsilon: this._optimizerEpsilon,
+      weightDecay: this._weightDecay,
+      numberTrainingStories: this._numberTrainingStories,
+      numberValidationStories: this._numberValidationStories,
+      // JSON.stringify drops undefined values, so an unset seed is simply left out.
+      seed: this._seed,
+    };
+  }
+
+  /**
+   * Creates Hyperparameters from values produced by toJSON(), e.g. read back
+   * from a saved model.
+   *
+   * The values are passed to the constructor rather than set one by one, so
+   * they are all validated as usual, and the order does not matter: setting
+   * numberAttentionHeads and embeddingSize separately could fail part way,
+   * since each setter checks that the embedding divides evenly between the
+   * heads. Any value that is missing takes its default. The random number
+   * stream starts from the beginning of the seed's stream, not from wherever
+   * the saved instance had reached.
+   *
+   * @param values - The values, as produced by toJSON().
+   * @returns A new Hyperparameters instance.
+   * @throws TypeError if values is not an object, or a bias setting is not a boolean.
+   * @throws RangeError if any value fails the constructor's validation.
+   */
+  static fromJSON(values: Partial<HyperparameterValues>): Hyperparameters {
+    if (typeof values !== "object" || values === null) {
+      throw new TypeError(`Hyperparameters| Expected an object of hyperparameter values; got ${values}`);
+    }
+    // The constructor does not validate the booleans, so check them here.
+    for (const name of ["qkvBias", "feedForwardBias"] as const) {
+      if (values[name] !== undefined && typeof values[name] !== "boolean") {
+        throw new TypeError(`Hyperparameters| ${name} must be true or false; got ${values[name]}`);
+      }
+    }
+    return new Hyperparameters(
+      values.embeddingSize,
+      values.contextLength,
+      values.dropoutRate,
+      values.mode,
+      values.numberAttentionHeads,
+      values.numberTransformerBlocks,
+      values.batchSize,
+      values.qkvBias,
+      values.feedForwardBias,
+      values.positionEmbeddingStandardDeviation,
+      values.tokenEmbeddingStandardDeviation,
+      values.linearLayerStandardDeviation,
+      values.outputLayerStandardDeviation,
+      values.outputLength,
+      values.trainingRatio,
+      values.numberEpochs,
+      values.learningRate,
+      values.beta1,
+      values.beta2,
+      values.optimizerEpsilon,
+      values.weightDecay,
+      values.numberTrainingStories,
+      values.numberValidationStories,
+      values.seed
+    );
   }
 
   /**
