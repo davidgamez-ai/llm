@@ -31,6 +31,10 @@ export interface HyperparameterValues {
   weightDecay: number;
   numberTrainingStories: number;
   numberValidationStories: number;
+  temperature: number;
+  samplingMethod: number;
+  topK: number;
+  topP: number;
   /** Left out when there is no seed. */
   seed?: number;
 }
@@ -67,6 +71,18 @@ class Hyperparameters {
    */
   static readonly GENERATION_MODE: number = 2;
 
+  /** Sampling method that always picks the most likely next token. */
+  static readonly GREEDY_SAMPLING: number = 0;
+
+  /** Sampling method that picks at random from the k most likely next tokens. */
+  static readonly TOP_K_SAMPLING: number = 1;
+
+  /**
+   * Sampling method that picks at random from the smallest set of most
+   * likely next tokens whose probabilities add up to at least p.
+   */
+  static readonly TOP_P_SAMPLING: number = 2;
+
   private _embeddingSize: number;
   private _contextLength: number;
   private readonly _vocabularySize: number;
@@ -92,6 +108,10 @@ class Hyperparameters {
   private _weightDecay: number;
   private _numberTrainingStories: number;
   private _numberValidationStories: number;
+  private _temperature: number;
+  private _samplingMethod: number;
+  private _topK: number;
+  private _topP: number;
   private _seed: number | undefined;
 
   /**
@@ -194,6 +214,23 @@ class Hyperparameters {
    * to 100 (17,266 tokens): enough for a steady measurement, while taking
    * only a few minutes at the end of each epoch. Must be a positive whole
    * number.
+   * @param temperature - How random text generation is: the logits are
+   * divided by the temperature before the softmax, so values near 0 make the
+   * most likely token ever more certain to be chosen, while 1 leaves the
+   * model's probabilities unchanged. Defaults to 1. Must be between 0 and 1
+   * inclusive.
+   * @param samplingMethod - How the next token is chosen during text
+   * generation: GREEDY_SAMPLING, TOP_K_SAMPLING or TOP_P_SAMPLING. Defaults
+   * to GREEDY_SAMPLING.
+   * @param topK - The number of most likely tokens TOP_K_SAMPLING chooses
+   * between. Defaults to 40, the value used by OpenAI's GPT-2 sampling
+   * script. Must be a positive whole number; values above vocabularySize
+   * keep every token.
+   * @param topP - The share of the probability TOP_P_SAMPLING keeps: it
+   * chooses between the smallest set of most likely tokens whose
+   * probabilities add up to at least topP. Defaults to 0.9, a common choice
+   * since Holtzman et al. introduced nucleus sampling. Must be greater than 0
+   * and at most 1.
    * @param seed - Optional PRNG seed for the random number stream returned
    * by random(), which every component uses for weight initialization,
    * dropout and decoding. When provided, the same seed always produces the
@@ -218,6 +255,10 @@ class Hyperparameters {
    * @throws RangeError if beta1 or beta2 is not at least 0 and less than 1.
    * @throws RangeError if weightDecay is negative, infinite or NaN.
    * @throws RangeError if numberTrainingStories or numberValidationStories is not a positive whole number.
+   * @throws RangeError if temperature is less than 0, greater than 1 or NaN.
+   * @throws RangeError if samplingMethod is not GREEDY_SAMPLING, TOP_K_SAMPLING or TOP_P_SAMPLING.
+   * @throws RangeError if topK is not a positive whole number.
+   * @throws RangeError if topP is not greater than 0 and at most 1.
    */
   constructor(
     embeddingSize: number = 768,//GPT-2 uses 768
@@ -243,6 +284,10 @@ class Hyperparameters {
     weightDecay: number = 0.1,
     numberTrainingStories: number = 1000,
     numberValidationStories: number = 100,
+    temperature: number = 1,
+    samplingMethod: number = Hyperparameters.GREEDY_SAMPLING,
+    topK: number = 40,
+    topP: number = 0.9,
     seed?: number
   ) {
     Hyperparameters.validatePositiveInteger("contextLength", contextLength);
@@ -266,6 +311,10 @@ class Hyperparameters {
     Hyperparameters.validateWeightDecay(weightDecay);
     Hyperparameters.validatePositiveInteger("numberTrainingStories", numberTrainingStories);
     Hyperparameters.validatePositiveInteger("numberValidationStories", numberValidationStories);
+    Hyperparameters.validateTemperature(temperature);
+    Hyperparameters.validateSamplingMethod(samplingMethod);
+    Hyperparameters.validatePositiveInteger("topK", topK);
+    Hyperparameters.validateTopP(topP);
 
     this._embeddingSize = embeddingSize;
     this._contextLength = contextLength;
@@ -292,6 +341,10 @@ class Hyperparameters {
     this._weightDecay = weightDecay;
     this._numberTrainingStories = numberTrainingStories;
     this._numberValidationStories = numberValidationStories;
+    this._temperature = temperature;
+    this._samplingMethod = samplingMethod;
+    this._topK = topK;
+    this._topP = topP;
     this._seed = seed;
     this._random = Hyperparameters.createRandom(seed);
   }
@@ -441,6 +494,10 @@ class Hyperparameters {
       weightDecay: this._weightDecay,
       numberTrainingStories: this._numberTrainingStories,
       numberValidationStories: this._numberValidationStories,
+      temperature: this._temperature,
+      samplingMethod: this._samplingMethod,
+      topK: this._topK,
+      topP: this._topP,
       // JSON.stringify drops undefined values, so an unset seed is simply left out.
       seed: this._seed,
     };
@@ -497,6 +554,10 @@ class Hyperparameters {
       values.weightDecay,
       values.numberTrainingStories,
       values.numberValidationStories,
+      values.temperature,
+      values.samplingMethod,
+      values.topK,
+      values.topP,
       values.seed
     );
   }
@@ -655,6 +716,54 @@ class Hyperparameters {
   private static validateWeightDecay(weightDecay: number): void {
     if (!(Number.isFinite(weightDecay) && weightDecay >= 0)) {
       throw new RangeError(`Hyperparameters| weightDecay must be a finite number >= 0; got ${weightDecay}`);
+    }
+  }
+
+  /**
+   * Checks that a temperature lies between 0 and 1 inclusive.
+   *
+   * @param temperature - The temperature to check.
+   * @throws RangeError if temperature is less than 0, greater than 1 or NaN.
+   */
+  private static validateTemperature(temperature: number): void {
+    // Written as a negated range check so that NaN, which fails every comparison, is rejected.
+    if (!(temperature >= 0 && temperature <= 1)) {
+      throw new RangeError(`Hyperparameters| temperature must be between 0 and 1; got ${temperature}`);
+    }
+  }
+
+  /**
+   * Checks that a top-p threshold is greater than 0 and at most 1. At 0 no
+   * token would be kept; at 1 every token is.
+   *
+   * @param topP - The threshold to check.
+   * @throws RangeError if topP is not greater than 0 and at most 1, or is NaN.
+   */
+  private static validateTopP(topP: number): void {
+    // Written as a negated range check so that NaN, which fails every comparison, is rejected.
+    if (!(topP > 0 && topP <= 1)) {
+      throw new RangeError(`Hyperparameters| topP must be greater than 0 and at most 1; got ${topP}`);
+    }
+  }
+
+  /**
+   * Checks that a sampling method is one of the three defined methods.
+   *
+   * @param samplingMethod - The sampling method to check.
+   * @throws RangeError if samplingMethod is not GREEDY_SAMPLING, TOP_K_SAMPLING or TOP_P_SAMPLING.
+   */
+  private static validateSamplingMethod(samplingMethod: number): void {
+    const samplingMethods: number[] = [
+      Hyperparameters.GREEDY_SAMPLING,
+      Hyperparameters.TOP_K_SAMPLING,
+      Hyperparameters.TOP_P_SAMPLING,
+    ];
+    if (!samplingMethods.includes(samplingMethod)) {
+      throw new RangeError(
+        `Hyperparameters| samplingMethod must be GREEDY_SAMPLING (${Hyperparameters.GREEDY_SAMPLING}), ` +
+        `TOP_K_SAMPLING (${Hyperparameters.TOP_K_SAMPLING}) or ` +
+        `TOP_P_SAMPLING (${Hyperparameters.TOP_P_SAMPLING}); got ${samplingMethod}`
+      );
     }
   }
 
@@ -965,6 +1074,67 @@ class Hyperparameters {
   set numberValidationStories(numberValidationStories: number) {
     Hyperparameters.validatePositiveInteger("numberValidationStories", numberValidationStories);
     this._numberValidationStories = numberValidationStories;
+  }
+
+  /**
+   * How random text generation is, between 0 and 1 inclusive. The logits are
+   * divided by the temperature before the softmax, so values near 0 make the
+   * most likely token ever more certain to be chosen, while 1 leaves the
+   * model's probabilities unchanged.
+   */
+  get temperature(): number {
+    return this._temperature;
+  }
+
+  /** @throws RangeError if temperature is less than 0, greater than 1 or NaN. */
+  set temperature(temperature: number) {
+    Hyperparameters.validateTemperature(temperature);
+    this._temperature = temperature;
+  }
+
+  /**
+   * How the next token is chosen during text generation: GREEDY_SAMPLING
+   * (always the most likely token), TOP_K_SAMPLING (at random from the k
+   * most likely) or TOP_P_SAMPLING (at random from the smallest set of most
+   * likely tokens whose probabilities add up to at least p).
+   */
+  get samplingMethod(): number {
+    return this._samplingMethod;
+  }
+
+  /** @throws RangeError if samplingMethod is not GREEDY_SAMPLING, TOP_K_SAMPLING or TOP_P_SAMPLING. */
+  set samplingMethod(samplingMethod: number) {
+    Hyperparameters.validateSamplingMethod(samplingMethod);
+    this._samplingMethod = samplingMethod;
+  }
+
+  /**
+   * The number of most likely tokens TOP_K_SAMPLING chooses between. Values
+   * above vocabularySize keep every token.
+   */
+  get topK(): number {
+    return this._topK;
+  }
+
+  /** @throws RangeError if topK is not a positive whole number. */
+  set topK(topK: number) {
+    Hyperparameters.validatePositiveInteger("topK", topK);
+    this._topK = topK;
+  }
+
+  /**
+   * The share of the probability TOP_P_SAMPLING keeps: it chooses between
+   * the smallest set of most likely tokens whose probabilities add up to at
+   * least topP.
+   */
+  get topP(): number {
+    return this._topP;
+  }
+
+  /** @throws RangeError if topP is not greater than 0 and at most 1. */
+  set topP(topP: number) {
+    Hyperparameters.validateTopP(topP);
+    this._topP = topP;
   }
 
   /**

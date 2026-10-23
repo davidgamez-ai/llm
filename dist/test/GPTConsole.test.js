@@ -69,22 +69,22 @@ const runConsole = async (t, typed, trainingFilePath = writeStoriesCsv(STORIES),
 };
 /** Counts how many times a pattern appears in the text. */
 const count = (text, pattern) => text.match(new RegExp(pattern.source, "g"))?.length ?? 0;
-test("the menu offers Train, Save model, Load model, Load GPT-2 small weights and Chat, in that order, and quit ends the program", async (t) => {
+test("the menu offers Train, Save model, Load model, Load GPT-2 small weights, Temperature, Sampling method and Chat, in that order, and quit ends the program", async (t) => {
     const written = await runConsole(t, ["quit"]);
-    assert.match(written, /1\. Train\n\s+2\. Save model\n\s+3\. Load model\n\s+4\. Load GPT-2 small weights\n\s+5\. Chat/);
+    assert.match(written, /1\. Train\n\s+2\. Save model\n\s+3\. Load model\n\s+4\. Load GPT-2 small weights\n\s+5\. Temperature\n\s+6\. Sampling method\n\s+7\. Chat/);
     assert.match(written, /Goodbye\./);
 });
 test("chat shows the model's continuation of each sentence, and quit returns to the menu", async (t) => {
-    const written = await runConsole(t, ["5", "Once upon a time", "", "The cat", "quit", "quit"]);
+    const written = await runConsole(t, ["7", "Once upon a time", "", "The cat", "quit", "quit"]);
     // Two replies: one per sentence, none for the empty line.
     assert.equal(count(written, /Model: /), 2);
     assert.match(written, /has not been trained yet/);
     // The menu is shown again after leaving chat (twice in all).
-    assert.equal(count(written, /5\. Chat/), 2);
+    assert.equal(count(written, /7\. Chat/), 2);
     assert.match(written, /Goodbye\./);
 });
 test("train asks for the hours, passes them on, describes the plan and trains", async (t) => {
-    const written = await runConsole(t, ["1", "2.5", "5", "Once upon a time", "quit", "quit"]);
+    const written = await runConsole(t, ["1", "2.5", "7", "Once upon a time", "quit", "quit"]);
     // The constructor builds the first model for 2.5 hours; the answer typed is passed on too.
     assert.deepEqual(requestedHours, [2.5, 2.5]);
     assert.match(written, /How many hours of training\?/);
@@ -147,7 +147,7 @@ test("an untrained model is rebuilt at the new size without asking", async (t) =
     assert.match(written, /Training finished/);
 });
 test("quitting with an untrained model does not ask for confirmation", async (t) => {
-    const written = await runConsole(t, ["5", "Hello", "quit", "quit"]);
+    const written = await runConsole(t, ["7", "Hello", "quit", "quit"]);
     assert.doesNotMatch(written, /Quit anyway\?/);
     assert.match(written, /Goodbye\./);
 });
@@ -156,7 +156,7 @@ test("quitting with a trained model asks for confirmation; 'n' stays in the prog
     assert.equal(count(written, /Quit anyway\? \(y\/n\)/), 2);
     assert.match(written, /The model has been trained 1 time, and its training will be lost when the program ends\./);
     // After "n" the menu is shown again: once at the start, once after training, once after declining.
-    assert.equal(count(written, /5\. Chat/), 3);
+    assert.equal(count(written, /7\. Chat/), 3);
     assert.equal(count(written, /Goodbye\./), 1);
     assert.match(written, /Quit anyway\? \(y\/n\): Goodbye\.\s*$/);
 });
@@ -171,8 +171,8 @@ test("a training error is shown and the console returns to the menu", async (t) 
     assert.match(written, /Goodbye\./);
 });
 test("quit is accepted in any case, and an unknown choice is reported", async (t) => {
-    const written = await runConsole(t, ["6", "2", "", "QUIT", "Quit"]);
-    assert.match(written, /"6" is not an option\./);
+    const written = await runConsole(t, ["8", "2", "", "QUIT", "Quit"]);
+    assert.match(written, /"8" is not an option\./);
     assert.match(written, /Goodbye\./);
 });
 /*
@@ -234,7 +234,7 @@ test("load replaces the model with a saved one, showing its progress, and chat u
     const filePath = path.join(modelFolder(), "trained.safetensors");
     // Train and save, then start a new console and load the saved model.
     await runConsole(t, ["1", "1", "2", filePath, "quit"]);
-    const written = await runConsole(t, ["3", filePath, "5", "Once upon a time", "quit", "quit"]);
+    const written = await runConsole(t, ["3", filePath, "7", "Once upon a time", "quit", "quit"]);
     assert.match(written, /File to load the model from\?/);
     assert.match(written, /Loading the model from .*trained\.safetensors \(\d+\.\d MB\)/);
     assert.match(written, /Loaded: 10% 20% 30% 40% 50% 60% 70% 80% 90% 100%\n/);
@@ -308,12 +308,78 @@ test("loading GPT-2 small replaces the model, showing progress, and sets longer 
     assert.match(written, /Loading GPT-2 small's weights from .*gpt2-small\.safetensors \(548\.1 MB\)/);
     assert.match(written, /Loaded: 10% 20% 30% 40% 50% 60% 70% 80% 90% 100%\n/);
     assert.match(written, /Model loaded in \d+\.\d seconds: 163\.0 million parameters, a model 768 values wide with 12 transformer blocks\./);
-    assert.match(written, /Chat replies will be 25 tokens long and take about a minute each/);
+    assert.match(written, new RegExp(`Chat replies will be ${GPTConsole.GPT2_OUTPUT_LENGTH} tokens long and take about a minute each`));
     assert.match(written, /trained 0 times since it was loaded from gpt2-small\.safetensors/);
+});
+/*
+ * Temperature and sampling method (menu options 5 and 6).
+ */
+test("temperature shows the current value and sets a new one", async (t) => {
+    const written = await runConsole(t, ["5", "0.7", "5", "quit", "quit"]);
+    assert.match(written, /The temperature is currently 1\./);
+    assert.match(written, /The temperature is now 0\.7\./);
+    // The second visit shows the new value, and "quit" leaves it unchanged.
+    assert.match(written, /The temperature is currently 0\.7\./);
+    assert.match(written, /The temperature is unchanged\./);
+});
+test("temperature asks again until the value is between 0 and 1", async (t) => {
+    const written = await runConsole(t, ["5", "1.5", "-0.1", "warm", "0", "quit"]);
+    assert.match(written, /"1\.5" is not a number between 0 and 1\./);
+    assert.match(written, /"-0\.1" is not a number between 0 and 1\./);
+    assert.match(written, /"warm" is not a number between 0 and 1\./);
+    assert.equal(count(written, /New temperature\?/), 4);
+    assert.match(written, /The temperature is now 0\./);
+});
+test("temperature notes that greedy sampling ignores it", async (t) => {
+    const greedy = await runConsole(t, ["5", "", "quit"]);
+    const topK = await runConsole(t, ["6", "top-k", "5", "", "quit"]);
+    assert.match(greedy, /Greedy sampling ignores the temperature/);
+    assert.doesNotMatch(topK, /Greedy sampling ignores the temperature/);
+});
+test("sampling method lists the methods and sets each one with its setting", async (t) => {
+    const written = await runConsole(t, ["6", "top-k 30", "6", "TOP-P 0.8", "6", "greedy", "6", "", "quit"]);
+    assert.match(written, /The sampling method is currently greedy\. The methods are:\n\s+greedy .*\n\s+top-p <p> .*\n\s+top-k <k> /);
+    assert.match(written, /The sampling method is now top-k \(k = 30\)\./);
+    assert.match(written, /The sampling method is currently top-k \(k = 30\)\./);
+    assert.match(written, /The sampling method is now top-p \(p = 0\.8\)\./);
+    assert.match(written, /The sampling method is now greedy\./);
+    assert.match(written, /The sampling method is unchanged\./);
+});
+test("sampling method keeps the current setting when none is typed", async (t) => {
+    const written = await runConsole(t, ["6", "top-k", "6", "top-p", "quit"]);
+    assert.match(written, /The sampling method is now top-k \(k = 40\)\./);
+    assert.match(written, /The sampling method is now top-p \(p = 0\.9\)\./);
+});
+test("sampling method asks again until the method and setting can be used", async (t) => {
+    const written = await runConsole(t, [
+        "6", "beam", "top-k 0", "top-k 2.5", "top-p 0", "top-p 1.5", "top-p high", "greedy 3", "top-k 30 40", "top-p 1", "quit",
+    ]);
+    assert.match(written, /"beam" is not a sampling method\./);
+    assert.match(written, /"0" is not a whole number of tokens, 1 or more\./);
+    assert.match(written, /"2\.5" is not a whole number of tokens, 1 or more\./);
+    assert.match(written, /"0" is not a number above 0 and up to 1\./);
+    assert.match(written, /"1\.5" is not a number above 0 and up to 1\./);
+    assert.match(written, /"high" is not a number above 0 and up to 1\./);
+    assert.match(written, /Greedy sampling does not take a setting\./);
+    assert.match(written, /"top-k 30 40" has too many parts\./);
+    assert.equal(count(written, /Please enter "greedy", "top-p <p>" or "top-k <k>", or "quit"\./), 8);
+    assert.match(written, /The sampling method is now top-p \(p = 1\)\./);
+});
+test("chat replies with top-k and top-p sampling", async (t) => {
+    const written = await runConsole(t, ["5", "0.8", "6", "top-k 5", "7", "Once upon a time", "quit", "6", "top-p 0.9", "7", "The cat", "quit", "quit"]);
+    assert.equal(count(written, /Model: /), 2);
+});
+test("the temperature and sampling method are kept when another model is loaded", async (t) => {
+    const filePath = path.join(modelFolder(), "decoding.safetensors");
+    await runConsole(t, ["2", filePath, "quit"]);
+    const written = await runConsole(t, ["5", "0.5", "6", "top-k 30", "3", filePath, "5", "", "6", "", "quit"]);
+    assert.match(written, /Model loaded in/);
+    assert.match(written, /Model loaded in[\s\S]*The temperature is currently 0\.5\./);
+    assert.match(written, /Model loaded in[\s\S]*The sampling method is currently top-k \(k = 30\)\./);
 });
 test("the program ends when the input ends, even while asking for the hours or chatting", async (t) => {
     const whileAsking = await runConsole(t, ["1"]);
-    const whileChatting = await runConsole(t, ["5", "Once upon a time"]);
+    const whileChatting = await runConsole(t, ["7", "Once upon a time"]);
     assert.match(whileAsking, /How many hours of training\?[\s\S]*Goodbye\./);
     assert.match(whileChatting, /Model: [\s\S]*Goodbye\./);
 });

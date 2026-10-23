@@ -35,7 +35,7 @@ export interface GPTConsoleOptions {
 
 /**
  * An interactive console for training the model and trying it out. run()
- * shows a menu with five options:
+ * shows a menu with seven options:
  *
  * 1. Train: asks how many hours to train for, then trains the model on
  *    TinyStories with Hyperparameters.forReducedTraining(hours).
@@ -48,9 +48,17 @@ export interface GPTConsoleOptions {
  * 4. Load GPT-2 small weights: replaces the current model with GPT-2 small,
  *    with OpenAI's pretrained weights (see ModelManager.loadGPT2), asking
  *    first in the same way as Load model.
- * 5. Chat: reads sentences typed by the user and shows how the model
+ * 5. Temperature: shows the temperature used when generating text and asks
+ *    for a new one, between 0 and 1.
+ * 6. Sampling method: shows how the next token is chosen when generating
+ *    text and asks for a new method: "greedy", "top-p" followed by p, or
+ *    "top-k" followed by k (e.g. "top-k 30").
+ * 7. Chat: reads sentences typed by the user and shows how the model
  *    continues each one, until the user types "quit", which returns to the
  *    menu.
+ *
+ * The temperature and sampling method are kept when the model is replaced
+ * by training a model of a different size or by loading one.
  *
  * Typing "quit" at the menu ends the program, after asking for confirmation
  * if the model has training that has not been saved, since it would be lost.
@@ -203,8 +211,10 @@ class GPTConsole {
         this.write("  2. Save model");
         this.write("  3. Load model");
         this.write("  4. Load GPT-2 small weights");
-        this.write("  5. Chat");
-        const choice: string | null = await this.ask(`Choose 1 to 5 (or "${GPTConsole.QUIT}" to exit): `);
+        this.write("  5. Temperature");
+        this.write("  6. Sampling method");
+        this.write("  7. Chat");
+        const choice: string | null = await this.ask(`Choose 1 to 7 (or "${GPTConsole.QUIT}" to exit): `);
 
         // Each option, and confirmQuit(), returns false if the input ended while it was asking for something, which also ends the program.
         if (choice === null) {
@@ -220,6 +230,10 @@ class GPTConsole {
         } else if (choice === "4") {
           running = await this.loadGPT2();
         } else if (choice === "5") {
+          running = await this.setTemperature();
+        } else if (choice === "6") {
+          running = await this.setSamplingMethod();
+        } else if (choice === "7") {
           running = await this.chat();
         } else {
           this.write(`"${choice}" is not an option.`);
@@ -649,7 +663,142 @@ class GPTConsole {
   }
 
   /**
-   * Menu option 5: reads sentences from the user and shows the model's
+   * Menu option 5: shows the current temperature and asks for a new one,
+   * repeating the question until the answer is a number between 0 and 1. An
+   * empty answer or "quit" leaves the temperature unchanged.
+   *
+   * @returns True to return to the menu; false if the input ended, which ends the program.
+   */
+  private async setTemperature(): Promise<boolean> {
+    this.write(`The temperature is currently ${this.hyperparameters.temperature}.`);
+    // Greedy sampling always takes the most likely token, so the temperature only matters for top-k and top-p.
+    if (this.hyperparameters.samplingMethod === Hyperparameters.GREEDY_SAMPLING) {
+      this.write("(Greedy sampling ignores the temperature; choose 6 at the menu to use top-k or top-p.)");
+    }
+
+    for (;;) {
+      const answer: string | null = await this.ask(
+        `New temperature? (0 to 1; press Enter or type "${GPTConsole.QUIT}" to cancel): `
+      );
+      if (answer === null) {
+        return false;
+      }
+      if (answer === "" || answer.toLowerCase() === GPTConsole.QUIT) {
+        this.write("The temperature is unchanged.");
+        return true;
+      }
+
+      // Number() rejects anything that is not entirely a number (see askHours).
+      const temperature: number = Number(answer);
+      if (temperature >= 0 && temperature <= 1) {
+        this.hyperparameters.temperature = temperature;
+        this.write(`The temperature is now ${temperature}.`);
+        return true;
+      }
+      this.write(`"${answer}" is not a number between 0 and 1. Please enter a temperature from 0 to 1, or "${GPTConsole.QUIT}".`);
+    }
+  }
+
+  /**
+   * Menu option 6: shows the current sampling method and asks for a new one,
+   * typed as the method's name followed by its setting, if it has one:
+   * "greedy", "top-p 0.9" or "top-k 30". If the setting is left out, the
+   * current value is kept. The question is repeated until the answer can be
+   * used. An empty answer or "quit" leaves the method unchanged.
+   *
+   * @returns True to return to the menu; false if the input ended, which ends the program.
+   */
+  private async setSamplingMethod(): Promise<boolean> {
+    this.write(`The sampling method is currently ${this.describeSamplingMethod()}. The methods are:`);
+    this.write("  greedy       always choose the most likely next token");
+    this.write("  top-p <p>    choose at random from the most likely tokens whose probabilities add up to p (above 0, up to 1)");
+    this.write("  top-k <k>    choose at random from the k most likely tokens (a whole number, 1 or more)");
+
+    for (;;) {
+      const answer: string | null = await this.ask(
+        `Sampling method? (e.g. "top-k 30"; press Enter or type "${GPTConsole.QUIT}" to cancel): `
+      );
+      if (answer === null) {
+        return false;
+      }
+      if (answer === "" || answer.toLowerCase() === GPTConsole.QUIT) {
+        this.write("The sampling method is unchanged.");
+        return true;
+      }
+
+      const problem: string | null = this.applySamplingMethod(answer);
+      if (problem === null) {
+        this.write(`The sampling method is now ${this.describeSamplingMethod()}.`);
+        return true;
+      }
+      this.write(`${problem} Please enter "greedy", "top-p <p>" or "top-k <k>", or "${GPTConsole.QUIT}".`);
+    }
+  }
+
+  /**
+   * Reads a sampling method typed by the user, e.g. "top-k 30", and if it is
+   * valid sets the hyperparameters to it. Nothing is changed if it is not.
+   *
+   * @param answer - The text typed: a method name, optionally followed by its setting.
+   * @returns Why the answer cannot be used, or null if the method has been set.
+   */
+  private applySamplingMethod(answer: string): string | null {
+    const [name, setting, ...extra] = answer.toLowerCase().split(/\s+/);
+    if (extra.length > 0) {
+      return `"${answer}" has too many parts.`;
+    }
+
+    if (name === "greedy") {
+      if (setting !== undefined) {
+        return "Greedy sampling does not take a setting.";
+      }
+      this.hyperparameters.samplingMethod = Hyperparameters.GREEDY_SAMPLING;
+      return null;
+    }
+
+    if (name === "top-k") {
+      // Number() rejects anything that is not entirely a number (see askHours).
+      const k: number = setting === undefined ? this.hyperparameters.topK : Number(setting);
+      if (!(Number.isInteger(k) && k > 0)) {
+        return `"${setting}" is not a whole number of tokens, 1 or more.`;
+      }
+      this.hyperparameters.topK = k;
+      this.hyperparameters.samplingMethod = Hyperparameters.TOP_K_SAMPLING;
+      return null;
+    }
+
+    if (name === "top-p") {
+      const p: number = setting === undefined ? this.hyperparameters.topP : Number(setting);
+      // Written as a negated range check so that NaN, from text that is not a number, is rejected.
+      if (!(p > 0 && p <= 1)) {
+        return `"${setting}" is not a number above 0 and up to 1.`;
+      }
+      this.hyperparameters.topP = p;
+      this.hyperparameters.samplingMethod = Hyperparameters.TOP_P_SAMPLING;
+      return null;
+    }
+
+    return `"${name}" is not a sampling method.`;
+  }
+
+  /**
+   * Describes the current sampling method with its setting, for messages.
+   *
+   * @returns e.g. "greedy", "top-k (k = 40)" or "top-p (p = 0.9)".
+   */
+  private describeSamplingMethod(): string {
+    switch (this.hyperparameters.samplingMethod) {
+      case Hyperparameters.TOP_K_SAMPLING:
+        return `top-k (k = ${this.hyperparameters.topK})`;
+      case Hyperparameters.TOP_P_SAMPLING:
+        return `top-p (p = ${this.hyperparameters.topP})`;
+      default:
+        return "greedy";
+    }
+  }
+
+  /**
+   * Menu option 7: reads sentences from the user and shows the model's
    * continuation of each, until the user types "quit". Empty lines are
    * ignored.
    *
@@ -709,11 +858,17 @@ class GPTConsole {
    * Makes a model the current one, with a new trainer and generator built
    * from its hyperparameters, and resets the record of its training. Used
    * for both newly built and loaded models; the caller sets loadedFrom for a
-   * loaded one.
+   * loaded one. The temperature and sampling method chosen in the console
+   * are carried over from the previous model, so replacing the model does
+   * not quietly undo them.
    *
    * @param model - The model, in generation mode.
    */
   private useModel(model: GPTModel): void {
+    // The constructor's call has no previous model to carry settings over from.
+    if (this.hyperparameters !== undefined) {
+      GPTConsole.copyDecodingSettings(this.hyperparameters, model.hyperparameters);
+    }
     this.model = model;
     this.hyperparameters = model.hyperparameters;
     this.trainer = new Trainer(this.hyperparameters, this.model);
@@ -769,6 +924,20 @@ class GPTConsole {
     to.batchSize = from.batchSize;
     to.learningRate = from.learningRate;
     to.outputLength = from.outputLength;
+  }
+
+  /**
+   * Copies the settings that control how the next token is chosen when
+   * generating text from one set of hyperparameters to another.
+   *
+   * @param from - The hyperparameters of the model being replaced.
+   * @param to - The hyperparameters of the new model.
+   */
+  private static copyDecodingSettings(from: Hyperparameters, to: Hyperparameters): void {
+    to.temperature = from.temperature;
+    to.samplingMethod = from.samplingMethod;
+    to.topK = from.topK;
+    to.topP = from.topP;
   }
 
   /**

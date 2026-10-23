@@ -463,6 +463,101 @@ test("the constructor rejects invalid story counts", () => {
   assert.throws(() => build(10, 1.5), RangeError);
 });
 
+test("temperature defaults to 1 and the setter accepts the boundaries 0 and 1", () => {
+  const hyperparameters = new Hyperparameters();
+  assert.equal(hyperparameters.temperature, 1);
+
+  hyperparameters.temperature = 0;
+  assert.equal(hyperparameters.temperature, 0);
+  hyperparameters.temperature = 0.7;
+  assert.equal(hyperparameters.temperature, 0.7);
+});
+
+test("temperature setter rejects values outside [0, 1] and NaN, leaving state unchanged", () => {
+  const hyperparameters = new Hyperparameters();
+
+  for (const value of [-0.1, 1.1, NaN, Infinity]) {
+    assert.throws(() => { hyperparameters.temperature = value; }, RangeError, `accepted ${value}`);
+  }
+  assert.equal(hyperparameters.temperature, 1);
+});
+
+test("the constructor rejects an invalid temperature", () => {
+  // Argument 24 is temperature.
+  const build = (temperature: number) =>
+    new Hyperparameters(768, 12, 0.1, Hyperparameters.TRAINING_MODE, 12, 12, 2, false, true,
+      0.01, 0.02, 0.02, 0.02, 2, 0.9, 1, 0.0004, 0.9, 0.999, 1e-8, 0.1, 1000, 100, temperature);
+
+  assert.doesNotThrow(() => build(0.5));
+  assert.throws(() => build(-0.1), RangeError);
+  assert.throws(() => build(1.5), RangeError);
+});
+
+test("samplingMethod defaults to GREEDY_SAMPLING and the setter accepts every sampling method", () => {
+  const hyperparameters = new Hyperparameters();
+  assert.equal(hyperparameters.samplingMethod, Hyperparameters.GREEDY_SAMPLING);
+
+  for (const samplingMethod of [Hyperparameters.TOP_K_SAMPLING, Hyperparameters.TOP_P_SAMPLING, Hyperparameters.GREEDY_SAMPLING]) {
+    hyperparameters.samplingMethod = samplingMethod;
+    assert.equal(hyperparameters.samplingMethod, samplingMethod);
+  }
+});
+
+test("samplingMethod setter rejects unknown values, leaving state unchanged", () => {
+  const hyperparameters = new Hyperparameters();
+
+  for (const value of [-1, 3, 0.5, NaN]) {
+    assert.throws(() => { hyperparameters.samplingMethod = value; }, RangeError, `accepted ${value}`);
+  }
+  assert.equal(hyperparameters.samplingMethod, Hyperparameters.GREEDY_SAMPLING);
+});
+
+test("the constructor rejects an invalid samplingMethod", () => {
+  // Argument 25 is samplingMethod.
+  const build = (samplingMethod: number) =>
+    new Hyperparameters(768, 12, 0.1, Hyperparameters.TRAINING_MODE, 12, 12, 2, false, true,
+      0.01, 0.02, 0.02, 0.02, 2, 0.9, 1, 0.0004, 0.9, 0.999, 1e-8, 0.1, 1000, 100, 1, samplingMethod);
+
+  assert.doesNotThrow(() => build(Hyperparameters.TOP_P_SAMPLING));
+  assert.throws(() => build(3), RangeError);
+});
+
+test("topK defaults to 40 and topP to 0.9, and the setters store valid values", () => {
+  const hyperparameters = new Hyperparameters();
+  assert.equal(hyperparameters.topK, 40);
+  assert.equal(hyperparameters.topP, 0.9);
+
+  hyperparameters.topK = 1;
+  hyperparameters.topP = 1;
+  assert.equal(hyperparameters.topK, 1);
+  assert.equal(hyperparameters.topP, 1);
+});
+
+test("topK and topP setters reject invalid values, leaving state unchanged", () => {
+  const hyperparameters = new Hyperparameters();
+
+  for (const value of NON_POSITIVE_INTEGERS) {
+    assert.throws(() => { hyperparameters.topK = value; }, RangeError, `topK accepted ${value}`);
+  }
+  for (const value of [0, -0.1, 1.1, NaN]) {
+    assert.throws(() => { hyperparameters.topP = value; }, RangeError, `topP accepted ${value}`);
+  }
+  assert.equal(hyperparameters.topK, 40);
+  assert.equal(hyperparameters.topP, 0.9);
+});
+
+test("the constructor rejects invalid topK and topP", () => {
+  // Arguments 26 and 27 are topK and topP.
+  const build = (topK: number, topP: number) =>
+    new Hyperparameters(768, 12, 0.1, Hyperparameters.TRAINING_MODE, 12, 12, 2, false, true,
+      0.01, 0.02, 0.02, 0.02, 2, 0.9, 1, 0.0004, 0.9, 0.999, 1e-8, 0.1, 1000, 100, 1,
+      Hyperparameters.GREEDY_SAMPLING, topK, topP);
+
+  assert.doesNotThrow(() => build(25, 0.95));
+  assert.throws(() => build(0, 0.95), RangeError);
+  assert.throws(() => build(25, 0), RangeError);
+});
+
 test("the constructor rejects invalid optimizer hyperparameters", () => {
   // Arguments 17 to 21 are learningRate, beta1, beta2, optimizerEpsilon and weightDecay.
   const build = (learningRate: number, beta1: number, beta2: number, optimizerEpsilon: number, weightDecay: number) =>

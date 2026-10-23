@@ -1,19 +1,19 @@
 import BPETokenizer from "./BPETokenizer.js";
 import Decoder from "./Decoder.js";
-import { softmax } from "./Loss.js";
 /**
  * Generates text with a GPTModel. The prompt is encoded into token ids once.
  * Then, until outputLength tokens have been generated, the ids are fed into
- * the model, the logits it returns are converted into probabilities, the
- * decoder chooses the next token's id from them, and that id is appended to
- * the ids. Finally the generated ids are converted back into text.
+ * the model, the decoder chooses the next token's id from the logits it
+ * returns, and that id is appended to the ids. Finally the generated ids are
+ * converted back into text.
  *
  * Working with ids throughout, as the book does, avoids converting the text
  * back and forth on every step. That would not be safe: byte pair encoding
  * does not always turn decoded text back into the same ids, because the new
  * token's text can merge with the text before it.
  *
- * Tokens are currently chosen with greedy decoding.
+ * Tokens are chosen with the method set by Hyperparameters.samplingMethod
+ * (see Decoder.decode).
  */
 class Generator {
     /**
@@ -26,7 +26,7 @@ class Generator {
     tokenizer;
     /** The model that produces a score (logit) for every possible next token. */
     model;
-    /** Chooses the id of the next token from the probabilities. */
+    /** Chooses the id of the next token from the logits. */
     decoder;
     /**
      * Creates a Generator for the given model, building its own tokenizer and
@@ -74,10 +74,10 @@ class Generator {
              * Only the last row of logits is needed: it scores every candidate for
              * the token that follows the whole input. In generation mode the model
              * only returns that row, but taking the last row would also work if it
-             * returned logits for every token.
+             * returned logits for every token. The decoder applies the temperature
+             * and the softmax itself, since the temperature scales the logits.
              */
-            const probabilities = softmax(logits[logits.length - 1]);
-            generatedIds.push(this.decoder.greedy(probabilities));
+            generatedIds.push(this.decoder.decode(logits[logits.length - 1]));
         }
         /*
          * Decode all the generated ids together rather than one at a time. A
