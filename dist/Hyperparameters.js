@@ -160,8 +160,8 @@ class Hyperparameters {
      * @param numberTrainingStories - The number of stories from the
      * TinyStories training data to train on. Defaults to 1000: TinyStories
      * averages about 210 tokens per story, and the first 1000 come to 235,419
-     * tokens, roughly 2.5 hours per epoch with forReducedTraining(). Must be a
-     * positive whole number.
+     * tokens, roughly 2 hours per epoch with smallModel(). Must be a positive
+     * whole number.
      * @param numberValidationStories - The number of stories from the
      * TinyStories validation data to measure the validation loss on. Defaults
      * to 100 (17,266 tokens): enough for a steady measurement, while taking
@@ -274,106 +274,120 @@ class Hyperparameters {
         this._random = Hyperparameters.createRandom(seed);
     }
     /**
-     * The number of tokens the model trains on per hour, on a laptop, with
-     * forReducedTraining()'s settings at embeddingSize 64. Measured; at other
-     * widths it scales as 1 / embeddingSize (see forReducedTraining).
-     */
-    static TOKENS_PER_HOUR_AT_WIDTH_64 = 187000;
-    /** The average number of tokens in a TinyStories story. Measured over 2,000 stories. */
-    static TOKENS_PER_STORY = 210;
-    /** The training time, in hours, from which forReducedTraining() uses the wider model (see forReducedTraining). */
-    static WIDER_MODEL_HOURS = 20;
-    /** The fewest stories forReducedTraining() trains on, however short the time: enough for a few batches. */
-    static MINIMUM_TRAINING_STORIES = 10;
-    /**
-     * Creates Hyperparameters for a model small enough to train on TinyStories
-     * (see Trainer.loadTinyStories) in roughly the given number of hours, as a
-     * demonstration that the model learns to write English. The defaults,
-     * GPT-2 small, are far too slow to train in plain TypeScript.
+     * Creates the Hyperparameters of the small model, for training from scratch
+     * in hours rather than days, as a demonstration that the model learns to
+     * write English. With about 110,000 training tokens an hour, it can get
+     * through a full pass of Tiny Shakespeare or a useful part of TinyStories.
      *
-     * TinyStories has far more text than can be trained on in a few hours, so
-     * every story is seen once: there is one epoch, and the training time is
-     * set by numberTrainingStories. The hours decide two things: how many
-     * stories to train on, and how wide the model should be.
+     * The three model sizes form a family, as GPT-2's do, with about 3.5 times
+     * as many parameters and a quarter of the speed at each step. The speeds
+     * were measured on one desktop computer (Ryzen 7 3800X):
      *
-     * How many stories. Training time is proportional to the number of tokens
-     * trained on. At embeddingSize 64 the model trains on about 187,000 tokens
-     * an hour, and stories average about 210 tokens, so it gets through about
-     * 890 stories an hour:
+     *     Size    Width  Heads  Blocks  Context  Parameters   Tokens per hour
+     *     small     128      4       4      128  13.7 million         110,000
+     *     medium    384      6       6      256  49.3 million          27,000
+     *     large     768     12      12     1024   163 million           8,000
      *
-     *     numberTrainingStories = hours x tokens per hour / 210
-     *
-     * How wide. Most of the training time is spent on the vocabulary: the
-     * output layer and the token embedding each have 50,257 rows of
-     * embeddingSize values, so the tokens trained on per hour fall in
-     * proportion to embeddingSize (measured: about 187,000 at 64 and 95,000 at
-     * 128). In every equal-time comparison made, the narrower model won,
-     * because it saw more text. Four configurations trained for about 40
-     * minutes each gave these validation losses:
-     *
-     *     embeddingSize 128, learning rate 0.001, dropout 0.1:   4.84
-     *     embeddingSize 128, learning rate 0.002, no dropout:    4.85
-     *     embeddingSize 64,  learning rate 0.002, no dropout:    4.61  (twice as many stories)
-     *     embeddingSize 128, contextLength 256:                  4.98
-     *
-     * and on the-verdict.txt, embeddingSize 128 got much further in a few
-     * hours than 256. A wider model only pays off once the narrow one has had
-     * as much text as it can usefully learn from. The usual rule of thumb
-     * (Hoffmann et al.'s "Chinchilla" study) is about 20 tokens per parameter,
-     * counting the parameters in the transformer blocks rather than the
-     * vocabulary: about 200,000 at embeddingSize 64, so about 4 million tokens,
-     * which takes about 20 hours. So the model is 64 wide below 20 hours and
-     * 128 wide from 20 hours on. This switch point is an estimate from the
-     * rule of thumb, not a measurement: no run that long was made.
+     * Most of the training time and most of the small model's parameters are
+     * in the vocabulary: the output layer and the token embedding each have
+     * 50,257 rows of embeddingSize values, so a wider model trains on fewer
+     * tokens an hour. A narrower model of width 64 is about twice as fast and
+     * did better in runs of about 40 minutes, because it saw more text
+     * (validation loss 4.61, against 4.84 at width 128). Width 128 was chosen
+     * for the small model because a model this size can make use of longer
+     * training, and because the step up to the medium model is then in
+     * proportion with the step from medium to large.
      *
      * The other settings, compared with GPT-2 small:
-     * - numberAttentionHeads 4, so each head works with 16 values at width 64
-     *   or 32 at width 128 (GPT-2 small uses 64).
-     * - numberTransformerBlocks 4 instead of 12.
      * - contextLength 128 instead of 1024. Shorter windows give more weight
-     *   updates for the same amount of text. Stories average about 210 tokens,
-     *   so some are split between windows.
+     *   updates for the same amount of text.
      * - dropoutRate 0 instead of 0.1. Dropout reduces overfitting when the same
-     *   text is seen again and again; here no story is repeated, so it would
-     *   only slow learning down.
-     * - learningRate 0.002 at width 64 and 0.001 at width 128, instead of the
-     *   book's 0.0004: smaller models tolerate, and need, larger steps. These
-     *   are the rates used in the experiments at each width.
+     *   text is seen again and again; a single pass over TinyStories repeats
+     *   nothing, so it would only slow learning down. Set it to 0.1 when
+     *   training for several epochs on a small text.
+     * - learningRate 0.001 instead of the book's 0.0004: smaller models
+     *   tolerate, and need, larger steps. This is the rate used in the
+     *   experiments at this width.
      * - numberEpochs 1, and outputLength 50 so generated samples are long
      *   enough to judge.
      *
      * Everything else (biases, weight initialization, batchSize 2, the other
-     * AdamW settings, numberValidationStories 100) keeps its default.
+     * AdamW settings) keeps its default.
      *
-     * The times are for the laptop the measurements were made on; a faster or
-     * slower computer will take proportionally less or more time.
-     *
-     * @param hours - The rough number of hours to train for. Defaults to 2.5. Must be a finite number greater than 0.
      * @returns A new Hyperparameters instance, in TRAINING_MODE, with no seed.
-     * @throws RangeError if hours is not a finite number greater than 0.
      */
-    static forReducedTraining(hours = 2.5) {
-        Hyperparameters.validatePositiveNumber("hours", hours);
+    static smallModel() {
+        return Hyperparameters.reducedModel(128, 4, 4, 128, 0.001);
+    }
+    /**
+     * Creates the Hyperparameters of the medium model, between the small model
+     * and GPT-2 small in both size and speed (see smallModel). At about 27,000
+     * training tokens an hour, it suits training over several days.
+     *
+     * The settings, compared with GPT-2 small:
+     * - embeddingSize 384, half of GPT-2 small's width.
+     * - numberAttentionHeads 6, so each head works with 64 values, as in GPT-2
+     *   small.
+     * - numberTransformerBlocks 6, half of GPT-2 small's depth.
+     * - contextLength 256, the value the book uses when training. TinyStories
+     *   averages about 210 tokens per story, so most stories fit in one window.
+     * - learningRate 0.0005, between the small model's rate and the book's
+     *   0.0004 for GPT-2 small. This is an estimate, not the result of an
+     *   experiment, as no long run of this size has been made.
+     * - dropoutRate 0, numberEpochs 1 and outputLength 50, as in the small
+     *   model.
+     *
+     * @returns A new Hyperparameters instance, in TRAINING_MODE, with no seed.
+     */
+    static mediumModel() {
+        return Hyperparameters.reducedModel(384, 6, 6, 256, 0.0005);
+    }
+    /**
+     * Creates the Hyperparameters of the large model, which matches GPT-2 small
+     * (see smallModel for the family of sizes). These are the constructor's
+     * defaults, apart from outputLength: a model this size takes about a minute
+     * to generate 25 tokens, so it generates 15 rather than the 50 of the
+     * smaller models.
+     *
+     * At about 8,000 training tokens an hour, it is too slow to train from
+     * scratch in plain TypeScript. Use it to continue training from OpenAI's
+     * weights (see ModelManager.loadGPT2).
+     *
+     * @returns A new Hyperparameters instance, in TRAINING_MODE, with no seed.
+     */
+    static largeModel() {
         const hyperparameters = new Hyperparameters();
-        // Below WIDER_MODEL_HOURS the narrow model learns more in the time; from then on the wider one does (see above).
-        const embeddingSize = hours < Hyperparameters.WIDER_MODEL_HOURS ? 64 : 128;
+        hyperparameters.outputLength = 15;
+        return hyperparameters;
+    }
+    /**
+     * Creates the Hyperparameters of a model smaller than GPT-2 small, with the
+     * training settings shared by smallModel and mediumModel: no dropout, one
+     * epoch and outputLength 50.
+     *
+     * @param embeddingSize - The size of each token embedding vector.
+     * @param numberAttentionHeads - The number of attention heads. Must divide embeddingSize exactly.
+     * @param numberTransformerBlocks - The number of transformer blocks.
+     * @param contextLength - The number of tokens of context.
+     * @param learningRate - The size of each AdamW weight update.
+     * @returns A new Hyperparameters instance, in TRAINING_MODE, with no seed.
+     */
+    static reducedModel(embeddingSize, numberAttentionHeads, numberTransformerBlocks, contextLength, learningRate) {
+        const hyperparameters = new Hyperparameters();
         /*
          * The number of heads is set before the embedding size because each
          * setter checks that the embedding divides evenly between the heads:
-         * 768, 64 and 128 are all divisible by 4, but 64 is not divisible by 12.
+         * 768 is divisible by the new number of heads, but the new embedding size
+         * need not be divisible by the default 12.
          */
-        hyperparameters.numberAttentionHeads = 4;
+        hyperparameters.numberAttentionHeads = numberAttentionHeads;
         hyperparameters.embeddingSize = embeddingSize;
-        hyperparameters.numberTransformerBlocks = 4;
-        hyperparameters.contextLength = 128;
+        hyperparameters.numberTransformerBlocks = numberTransformerBlocks;
+        hyperparameters.contextLength = contextLength;
         hyperparameters.dropoutRate = 0;
-        hyperparameters.learningRate = embeddingSize === 64 ? 0.002 : 0.001;
+        hyperparameters.learningRate = learningRate;
         hyperparameters.numberEpochs = 1;
         hyperparameters.outputLength = 50;
-        // The tokens trained on per hour fall in proportion to the width; enough stories to fill the time.
-        const tokensPerHour = Hyperparameters.TOKENS_PER_HOUR_AT_WIDTH_64 * (64 / embeddingSize);
-        const stories = Math.round((hours * tokensPerHour) / Hyperparameters.TOKENS_PER_STORY);
-        hyperparameters.numberTrainingStories = Math.max(Hyperparameters.MINIMUM_TRAINING_STORIES, stories);
         return hyperparameters;
     }
     /**
@@ -875,7 +889,7 @@ class Hyperparameters {
     /**
      * The number of stories from the TinyStories training data to train on.
      * TinyStories averages about 210 tokens per story, so training time grows
-     * by roughly 1 hour per 450 stories with forReducedTraining().
+     * by roughly 1 hour per 500 stories with smallModel().
      */
     get numberTrainingStories() {
         return this._numberTrainingStories;

@@ -827,7 +827,10 @@ each step would be very slow. It also cannot train on
 throws. The book reduces contextLength to 256 in chapter 5 for the same
 reasons.
 
-**`Hyperparameters.forReducedTraining()`** returns a configuration chosen
+`Hyperparameters.smallModel()`, `mediumModel()` and `largeModel()` have since
+replaced the method described here; see their comments for the current sizes.
+
+**`Hyperparameters.forReducedTraining()`** returned a configuration chosen
 by measurement for training on `the-verdict.txt` in a few hours:
 
 | Hyperparameter | Value | GPT-2 small |

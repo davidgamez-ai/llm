@@ -34,19 +34,17 @@ test("contextLength setter rejects invalid values and leaves state unchanged", (
   assert.equal(hyperparameters.contextLength, 1024);
 });
 
-test("forReducedTraining() defaults to 2.5 hours: a small model for one pass over about 2,200 stories", () => {
-  const hyperparameters = Hyperparameters.forReducedTraining();
+test("smallModel() has the architecture and training settings of the small model", () => {
+  const hyperparameters = Hyperparameters.smallModel();
 
-  assert.equal(hyperparameters.embeddingSize, 64);
+  assert.equal(hyperparameters.embeddingSize, 128);
   assert.equal(hyperparameters.numberAttentionHeads, 4);
-  assert.equal(hyperparameters.weightMatrixColumns, 16);
+  assert.equal(hyperparameters.weightMatrixColumns, 32);
   assert.equal(hyperparameters.numberTransformerBlocks, 4);
   assert.equal(hyperparameters.contextLength, 128);
   assert.equal(hyperparameters.dropoutRate, 0);
-  assert.equal(hyperparameters.learningRate, 0.002);
+  assert.equal(hyperparameters.learningRate, 0.001);
   assert.equal(hyperparameters.numberEpochs, 1);
-  // 2.5 hours x 187,000 tokens an hour / 210 tokens a story.
-  assert.equal(hyperparameters.numberTrainingStories, 2226);
   assert.equal(hyperparameters.outputLength, 50);
   // Unchanged from the defaults.
   assert.equal(hyperparameters.vocabularySize, 50257);
@@ -55,51 +53,54 @@ test("forReducedTraining() defaults to 2.5 hours: a small model for one pass ove
   assert.equal(hyperparameters.mode, Hyperparameters.TRAINING_MODE);
 });
 
-test("forReducedTraining(hours) trains on stories in proportion to the hours", () => {
-  assert.equal(Hyperparameters.forReducedTraining(1).numberTrainingStories, 890);
-  assert.equal(Hyperparameters.forReducedTraining(5).numberTrainingStories, 4452);
-  assert.equal(Hyperparameters.forReducedTraining(10).numberTrainingStories, 8905);
+test("mediumModel() has the architecture and training settings of the medium model", () => {
+  const hyperparameters = Hyperparameters.mediumModel();
+
+  assert.equal(hyperparameters.embeddingSize, 384);
+  assert.equal(hyperparameters.numberAttentionHeads, 6);
+  assert.equal(hyperparameters.weightMatrixColumns, 64);
+  assert.equal(hyperparameters.numberTransformerBlocks, 6);
+  assert.equal(hyperparameters.contextLength, 256);
+  assert.equal(hyperparameters.dropoutRate, 0);
+  assert.equal(hyperparameters.learningRate, 0.0005);
+  assert.equal(hyperparameters.numberEpochs, 1);
+  assert.equal(hyperparameters.outputLength, 50);
+  assert.equal(hyperparameters.mode, Hyperparameters.TRAINING_MODE);
 });
 
-test("forReducedTraining(hours) keeps the narrow model below 20 hours and uses the wider one from 20 hours", () => {
-  const below = Hyperparameters.forReducedTraining(19.9);
-  const from = Hyperparameters.forReducedTraining(20);
+test("largeModel() matches GPT-2 small", () => {
+  const hyperparameters = Hyperparameters.largeModel();
+  const defaults = new Hyperparameters();
 
-  assert.equal(below.embeddingSize, 64);
-  assert.equal(below.learningRate, 0.002);
-  assert.equal(from.embeddingSize, 128);
-  assert.equal(from.weightMatrixColumns, 32);
-  assert.equal(from.learningRate, 0.001);
-  // The wider model gets through half as many tokens an hour: 20 x 93,500 / 210.
-  assert.equal(from.numberTrainingStories, 8905);
+  assert.equal(hyperparameters.embeddingSize, 768);
+  assert.equal(hyperparameters.numberAttentionHeads, 12);
+  assert.equal(hyperparameters.numberTransformerBlocks, 12);
+  assert.equal(hyperparameters.contextLength, 1024);
+  assert.equal(hyperparameters.dropoutRate, 0.1);
+  assert.equal(hyperparameters.qkvBias, true);
+  assert.equal(hyperparameters.feedForwardBias, true);
+  // The only difference from the defaults is the length of generated text.
+  assert.equal(hyperparameters.outputLength, 15);
+  assert.deepEqual({ ...hyperparameters.toJSON(), outputLength: defaults.outputLength }, defaults.toJSON());
 });
 
-test("forReducedTraining(hours) trains on at least 10 stories, however short the time", () => {
-  assert.equal(Hyperparameters.forReducedTraining(0.001).numberTrainingStories, 10);
-});
-
-test("forReducedTraining(hours) rejects hours that are not a finite number greater than 0", () => {
-  for (const hours of [0, -1, NaN, Infinity]) {
-    assert.throws(() => Hyperparameters.forReducedTraining(hours), RangeError, `accepted ${hours}`);
-  }
-});
-
-test("forReducedTraining() returns a new instance each time, leaving the GPT-2 small defaults alone", () => {
-  const first = Hyperparameters.forReducedTraining();
+test("the model sizes return a new instance each time, leaving the GPT-2 small defaults alone", () => {
+  const first = Hyperparameters.smallModel();
   first.numberTrainingStories = 10;
 
-  assert.equal(Hyperparameters.forReducedTraining().numberTrainingStories, 2226);
+  assert.equal(Hyperparameters.smallModel().numberTrainingStories, 1000);
   assert.equal(new Hyperparameters().embeddingSize, 768);
 });
 
-test("forReducedTraining() builds a model of about 6.5 million parameters, almost all in the vocabulary", () => {
-  const model = new GPTModel(Hyperparameters.forReducedTraining());
+test("the small and medium models build the expected numbers of parameters, most of them in the vocabulary", () => {
+  const small = new GPTModel(Hyperparameters.smallModel()).getParameterCount();
+  const medium = new GPTModel(Hyperparameters.mediumModel()).getParameterCount();
 
-  const total = model.getParameterCount();
-  const vocabulary = 2 * 50257 * 64;
-  assert.ok(total > 6.4e6 && total < 6.8e6, `${total} parameters`);
-  // The token embedding and output layer: 50,257 x 64 each.
-  assert.ok(vocabulary / total > 0.95);
+  assert.equal(small, 13675520);
+  assert.ok(medium > 49e6 && medium < 50e6, `${medium} parameters`);
+  // The token embedding and output layer: 50,257 x embeddingSize each.
+  assert.ok((2 * 50257 * 128) / small > 0.9);
+  assert.ok((2 * 50257 * 384) / medium > 0.75);
 });
 
 test("the architecture defaults are those of GPT-2 small", () => {

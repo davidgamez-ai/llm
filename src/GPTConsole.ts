@@ -8,14 +8,24 @@ import Trainer from "./Trainer.js";
 import BPETokenizer from "./BPETokenizer.js";
 import ModelManager, { ProgressCallback } from "./ModelManager.js";
 
+/** The sizes of model the console can train. */
+export type ModelSize = "small" | "medium" | "large";
+
 /** Settings for a GPTConsole. Every one is optional. */
 export interface GPTConsoleOptions {
   /**
-   * Creates the hyperparameters for training for a given number of hours.
-   * Defaults to Hyperparameters.forReducedTraining; tests pass a function
-   * that builds a tiny model instead.
+   * Creates the hyperparameters for a model of a given size. Defaults to
+   * Hyperparameters.smallModel, mediumModel or largeModel; tests pass a
+   * function that builds a tiny model instead.
    */
-  hyperparametersForHours?: (hours: number) => Hyperparameters;
+  hyperparametersForSize?: (size: ModelSize) => Hyperparameters;
+
+  /**
+   * The training speed used to work out how much to train on in the time
+   * chosen. Defaults to GPTConsole.PARAMETER_TOKENS_PER_HOUR; tests pass a low
+   * value, so that training uses the fewest stories whatever the hours.
+   */
+  parameterTokensPerHour?: number;
 
   /** Path to the TinyStories training CSV file. Defaults to data/TinyStories_train.csv. */
   trainingFilePath?: string;
@@ -23,7 +33,7 @@ export interface GPTConsoleOptions {
   /** Path to the TinyStories validation CSV file. Defaults to data/TinyStories_validation.csv. */
   validationFilePath?: string;
 
-  /** Path to OpenAI's GPT-2 small weights. Defaults to ModelManager.GPT2_SMALL_FILE (models/gpt2-small.safetensors). */
+  /** Path to OpenAI's GPT-2 small weights. Defaults to ModelManager.GPT2_SMALL_FILE (models/gpt2-small-weights.safetensors). */
   gpt2FilePath?: string;
 
   /** Where the user's typing is read from. Defaults to the keyboard (process.stdin); tests pass their own stream. */
@@ -35,19 +45,22 @@ export interface GPTConsoleOptions {
 
 /**
  * An interactive console for training the model and trying it out. run()
- * shows a menu with seven options:
+ * first asks for the size of model (small, medium, or large, which is GPT-2
+ * small) and creates one with random weights. It then shows a menu with seven
+ * options:
  *
- * 1. Train: asks how many hours to train for, then trains the model on
- *    TinyStories with Hyperparameters.forReducedTraining(hours).
+ * 1. Train: asks how many hours to train for, then trains the current model
+ *    on as many TinyStories stories as fit in that time.
  * 2. Save model: asks for a file name and saves the model's weights and
  *    hyperparameters there (see ModelManager), asking before overwriting an
  *    existing file.
  * 3. Load model: asks for a file name and replaces the current model with
  *    the one saved there, asking first if the current model has training
  *    that has not been saved.
- * 4. Load GPT-2 small weights: replaces the current model with GPT-2 small,
- *    with OpenAI's pretrained weights (see ModelManager.loadGPT2), asking
- *    first in the same way as Load model.
+ * 4. Load GPT-2 small weights: loads OpenAI's pretrained weights into the
+ *    current model if it is the right shape; otherwise replaces it with a
+ *    large model and loads them into that, saying so. Asks first in the same
+ *    way as Load model.
  * 5. Temperature: shows the temperature used when generating text and asks
  *    for a new one, between 0 and 1.
  * 6. Sampling method: shows how the next token is chosen when generating
@@ -57,8 +70,8 @@ export interface GPTConsoleOptions {
  *    continues each one, until the user types "quit", which returns to the
  *    menu.
  *
- * The temperature and sampling method are kept when the model is replaced
- * by training a model of a different size or by loading one.
+ * The temperature and sampling method are kept when the model is replaced by
+ * loading one.
  *
  * Typing "quit" at the menu ends the program, after asking for confirmation
  * if the model has training that has not been saved, since it would be lost.
@@ -66,12 +79,8 @@ export interface GPTConsoleOptions {
  * The model, trainer and generator are shared, so chat always uses the
  * latest trained weights, and training again continues from where the last
  * training finished: the trainer keeps its optimizer, and each run trains on
- * the stories that follow the ones the last run used. The number of hours
- * can change the size of the model, though (forReducedTraining uses a wider
- * model for long training), and a model of a different size has to start
- * again from random weights; the console asks before throwing training away.
- * Before any training the model's weights are random, so its replies are
- * random tokens.
+ * the stories that follow the ones the last run used. Before any training
+ * the model's weights are random, so its replies are random tokens.
  *
  * A loaded model gets a new trainer, so training it again starts a new
  * optimizer and starts again from the first story.
@@ -87,12 +96,45 @@ class GPTConsole {
   /**
    * The most hours of training the console accepts. A larger number is more
    * likely a typing mistake than a plan, and is far beyond the training
-   * times that forReducedTraining's estimates were measured on.
+   * times that the speed estimates were measured on.
    */
   static readonly MAXIMUM_HOURS: number = 100;
 
-  /** The hours used to build the model before any training has been chosen, so that chat works straight away. */
-  private static readonly INITIAL_HOURS: number = 2.5;
+  /** The sizes of model offered at startup, in the order they are listed. */
+  private static readonly MODEL_SIZES: { size: ModelSize; label: string; create: () => Hyperparameters }[] = [
+    { size: "small", label: "Small", create: Hyperparameters.smallModel },
+    { size: "medium", label: "Medium", create: Hyperparameters.mediumModel },
+    { size: "large", label: "Large (GPT-2 small)", create: Hyperparameters.largeModel },
+  ];
+
+  /**
+   * Training speed: tokens trained on per hour multiplied by the number of
+   * parameters. Time per token grows in proportion to the number of
+   * parameters, so this is nearly the same for every model, and also gives
+   * estimates for loaded models of any shape. Measured on a desktop computer
+   * (Ryzen 7 3800X); a faster or slower computer will take proportionally less
+   * or more time:
+   *
+   *     Parameters      Tokens per hour   Multiplied
+   *     6.6 million             213,000   1.41 trillion
+   *     13.7 million            110,000   1.50 trillion
+   *     49.3 million             27,000   1.33 trillion
+   *     163 million               8,100   1.32 trillion
+   */
+  static readonly PARAMETER_TOKENS_PER_HOUR: number = 1.35e12;
+
+  /**
+   * How many times faster the validation loss is measured than the model is
+   * trained, per token, since validation only has a forward pass. Measured at
+   * 3 to 4 times.
+   */
+  private static readonly VALIDATION_SPEED_RATIO: number = 3;
+
+  /** The average number of tokens in a TinyStories story. Measured over 2,000 stories. */
+  private static readonly TOKENS_PER_STORY: number = 210;
+
+  /** The fewest stories the console trains on, however short the time. */
+  private static readonly MINIMUM_TRAINING_STORIES: number = 10;
 
   /**
    * The number of tokens GPT-2 small generates in each chat reply: enough
@@ -119,13 +161,16 @@ class GPTConsole {
   /** True if the model has been trained since it was built, loaded or last saved, so quitting or loading would lose training. */
   private unsavedTraining: boolean = false;
 
-  /** Creates the hyperparameters for a number of hours of training. */
-  private readonly hyperparametersForHours: (hours: number) => Hyperparameters;
+  /** Creates the hyperparameters for a size of model. */
+  private readonly hyperparametersForSize: (size: ModelSize) => Hyperparameters;
+
+  /** The training speed used to work out how much to train on in the time chosen. */
+  private readonly parameterTokensPerHour: number;
 
   /*
    * The current model and the objects built with it. They are set by
-   * buildModel(), which the constructor calls; the "!" tells TypeScript that
-   * they are set, since it cannot see into buildModel().
+   * buildModel(), which run() calls before showing the menu; the "!" tells
+   * TypeScript that they are set, since it cannot see into buildModel().
    */
 
   /** The settings the current model was built with, shared by the trainer and the generator. */
@@ -167,15 +212,15 @@ class GPTConsole {
   private lines: AsyncIterator<string> | null = null;
 
   /**
-   * Creates a GPTConsole and builds an untrained model, so that chat can be
-   * tried before training. The model is built from the hyperparameters for
-   * INITIAL_HOURS (2.5) of training; choosing Train may rebuild it at a
-   * different size.
+   * Creates a GPTConsole. No model is built until run() has asked for its
+   * size.
    *
    * @param options - Optional settings; see GPTConsoleOptions.
    */
   constructor(options: GPTConsoleOptions = {}) {
-    this.hyperparametersForHours = options.hyperparametersForHours ?? ((hours: number) => Hyperparameters.forReducedTraining(hours));
+    this.hyperparametersForSize = options.hyperparametersForSize ??
+      ((size: ModelSize) => GPTConsole.MODEL_SIZES.find((option) => option.size === size)!.create());
+    this.parameterTokensPerHour = options.parameterTokensPerHour ?? GPTConsole.PARAMETER_TOKENS_PER_HOUR;
 
     // The data folder is found from this compiled file's location (dist/), so the console works however it is launched.
     const dataFolder: string = path.join(import.meta.dirname, "..", "data");
@@ -185,14 +230,48 @@ class GPTConsole {
 
     this.input = options.input ?? process.stdin;
     this.output = options.output ?? process.stdout;
-
-    this.buildModel(this.hyperparametersForHours(GPTConsole.INITIAL_HOURS));
   }
 
   /**
-   * Starts the interactive console: shows the menu, carries out each choice,
-   * and shows the menu again, until the user types "quit" at the menu or the
-   * input ends.
+   * Works out how many TinyStories stories a model can train on in roughly a
+   * given number of hours. Training time is proportional to the number of
+   * tokens trained on, so:
+   *
+   *     tokens per hour = PARAMETER_TOKENS_PER_HOUR / number of parameters
+   *     training tokens = hours x tokens per hour - validation allowance
+   *     stories         = training tokens / tokens per story
+   *
+   * The validation allowance leaves time for measuring the validation loss at
+   * the end, which takes about 2 minutes for the small model, 12 for the medium
+   * model and 45 for the large one. The result is never fewer than
+   * MINIMUM_TRAINING_STORIES, or than the stories needed for two batches, so a
+   * short time can run for longer than asked.
+   *
+   * @param hours - The rough number of hours to train for, including validation.
+   * @param hyperparameters - The settings of the model: the source of numberValidationStories, batchSize and contextLength.
+   * @param parameterCount - The number of parameters in the model.
+   * @param parameterTokensPerHour - The training speed. Defaults to PARAMETER_TOKENS_PER_HOUR.
+   * @returns The number of training stories.
+   */
+  static storiesForHours(
+    hours: number,
+    hyperparameters: Hyperparameters,
+    parameterCount: number,
+    parameterTokensPerHour: number = GPTConsole.PARAMETER_TOKENS_PER_HOUR
+  ): number {
+    const tokensPerHour: number = parameterTokensPerHour / parameterCount;
+    const validationTokens: number = hyperparameters.numberValidationStories * GPTConsole.TOKENS_PER_STORY;
+    const trainingTokens: number = hours * tokensPerHour - validationTokens / GPTConsole.VALIDATION_SPEED_RATIO;
+
+    const storiesForTwoBatches: number = Math.ceil((2 * hyperparameters.batchSize * hyperparameters.contextLength) / GPTConsole.TOKENS_PER_STORY);
+    const minimum: number = Math.max(GPTConsole.MINIMUM_TRAINING_STORIES, storiesForTwoBatches);
+    return Math.max(minimum, Math.round(trainingTokens / GPTConsole.TOKENS_PER_STORY));
+  }
+
+  /**
+   * Starts the interactive console: asks for the size of model and creates
+   * it, then shows the menu, carries out each choice, and shows the menu
+   * again, until the user types "quit" at the menu or the input ends.
    *
    * @returns A promise that resolves when the console has ended.
    */
@@ -201,8 +280,8 @@ class GPTConsole {
     this.lines = lineReader[Symbol.asyncIterator]();
 
     try {
-      this.write("GPT console: train a small GPT model on TinyStories and chat with it.");
-      let running: boolean = true;
+      this.write("GPT console: train a GPT model on TinyStories and chat with it.");
+      let running: boolean = await this.createFirstModel();
       while (running) {
         this.write("");
         const loaded: string = this.loadedFrom === null ? "" : ` since it was loaded from ${path.basename(this.loadedFrom)}`;
@@ -246,6 +325,37 @@ class GPTConsole {
   }
 
   /**
+   * Asks which size of model to use, repeating the question until the answer
+   * is one of the options, and creates a model of that size with random
+   * weights. Typing "quit" ends the program.
+   *
+   * @returns True if a model was created; false if the user quit or the input ended.
+   */
+  private async createFirstModel(): Promise<boolean> {
+    this.write("");
+    this.write("Model size:");
+    GPTConsole.MODEL_SIZES.forEach(({ label }, index) => this.write(`  ${index + 1}. ${label}`));
+
+    for (;;) {
+      const answer: string | null = await this.ask(`Choose 1 to ${GPTConsole.MODEL_SIZES.length} (or "${GPTConsole.QUIT}" to exit): `);
+      if (answer === null || answer.toLowerCase() === GPTConsole.QUIT) {
+        return false;
+      }
+
+      const option = GPTConsole.MODEL_SIZES.find((_, index) => String(index + 1) === answer);
+      if (option !== undefined) {
+        this.buildModel(this.hyperparametersForSize(option.size));
+        this.write(
+          `Created a model with random weights: ${(this.model.getParameterCount() / 1e6).toFixed(1)} million parameters, ` +
+          `${this.hyperparameters.embeddingSize} values wide with ${this.hyperparameters.numberTransformerBlocks} transformer blocks.`
+        );
+        return true;
+      }
+      this.write(`"${answer}" is not an option.`);
+    }
+  }
+
+  /**
    * Checks that the user really wants to quit, if that would lose training:
    * the weights are kept in memory until they are saved, so training that
    * may have taken hours is lost when the program ends. If there is no
@@ -270,11 +380,14 @@ class GPTConsole {
   }
 
   /**
-   * Menu option 1: asks how many hours to train for, works out the
-   * hyperparameters for that time, and trains the model on TinyStories. The
-   * trainer prints its progress as it goes. Training blocks the console until
-   * it finishes. If the data cannot be loaded (for example, if a file is
-   * missing), the error is shown and the console returns to the menu.
+   * Menu option 1: asks how many hours to train for, sets the hyperparameters
+   * for that amount of training, and trains the current model on TinyStories,
+   * keeping its weights. TinyStories has far more text than can be trained on
+   * in a few hours, so every story is seen once: there is one epoch, and the
+   * number of stories sets the time (see storiesForHours). The trainer prints
+   * its progress as it goes. Training blocks the console until it finishes. If
+   * the data cannot be loaded (for example, if a file is missing), the error
+   * is shown and the console returns to the menu.
    *
    * @returns True to return to the menu; false if the input ended, which ends the program.
    */
@@ -288,29 +401,13 @@ class GPTConsole {
       return true;
     }
 
-    const planned: Hyperparameters = this.hyperparametersForHours(hours);
-
-    if (GPTConsole.sameArchitecture(planned, this.hyperparameters)) {
-      // The current model is the right size: keep its weights, and train it with the new amount of data.
-      GPTConsole.copyTrainingSettings(planned, this.hyperparameters);
-    } else {
-      // A model of a different size has to start again from random weights. Ask first if that would lose training or a loaded model.
-      if (this.trainingRuns > 0 || this.loadedFrom !== null) {
-        this.write(
-          `Training for ${hours} hours needs a model ${planned.embeddingSize} values wide, but the current model is ` +
-          `${this.hyperparameters.embeddingSize} wide. A new model would start again from random weights, losing the current training.`
-        );
-        const answer: string | null = await this.ask("Start a new model? (y/n): ");
-        if (answer === null) {
-          return false;
-        }
-        if (!GPTConsole.isYes(answer)) {
-          this.write("Training cancelled; the current model is unchanged.");
-          return true;
-        }
-      }
-      this.buildModel(planned);
-    }
+    this.hyperparameters.numberEpochs = 1;
+    this.hyperparameters.numberTrainingStories = GPTConsole.storiesForHours(
+      hours,
+      this.hyperparameters,
+      this.model.getParameterCount(),
+      this.parameterTokensPerHour
+    );
 
     this.writePlan(hours);
     try {
@@ -464,10 +561,14 @@ class GPTConsole {
   }
 
   /**
-   * Menu option 4: replaces the current model with GPT-2 small, with
-   * OpenAI's pretrained weights read from gpt2FilePath (see replaceModel),
-   * and sets its replies to GPT2_OUTPUT_LENGTH tokens. If the weights have
-   * not been downloaded, says where to get them and returns to the menu.
+   * Menu option 4: loads OpenAI's pretrained weights from gpt2FilePath and
+   * sets the model's replies to GPT2_OUTPUT_LENGTH tokens. If the current
+   * model has GPT-2 small's shape (a large model), the weights are loaded into
+   * it, which saves building another model. Any other model, such as a small
+   * or medium one, cannot hold them, so it is replaced with a large model and
+   * the user is told. Either way the current weights and training are lost, so
+   * replaceModel asks first if any training has not been saved. If the weights
+   * have not been downloaded, says where to get them and returns to the menu.
    *
    * @returns True to return to the menu; false if the input ended, which ends the program.
    */
@@ -477,15 +578,28 @@ class GPTConsole {
       this.write(`  curl.exe -L ${ModelManager.GPT2_SMALL_URL} -o "${this.gpt2FilePath}"`);
       return true;
     }
+
+    // Worked out now, since the model and its hyperparameters may be replaced by the time the note is shown.
+    const compatible: boolean = ModelManager.isGPT2SmallShape(this.hyperparameters);
+    const changeNote: string = compatible
+      ? "The current model already has GPT-2 small's shape, so the weights were loaded into it."
+      : `The current model (${this.hyperparameters.embeddingSize} values wide with ${this.hyperparameters.numberTransformerBlocks} transformer blocks) ` +
+        "cannot hold GPT-2 small's weights, so it has been replaced with a large model.";
+
     return this.replaceModel(
       this.gpt2FilePath,
       "GPT-2 small's weights",
       (onProgress) => {
-        const model: GPTModel = this.modelManager.loadGPT2(this.gpt2FilePath, Hyperparameters.GENERATION_MODE, onProgress);
+        let model: GPTModel = this.model;
+        if (compatible) {
+          this.modelManager.loadGPT2Weights(model, this.gpt2FilePath, onProgress);
+        } else {
+          model = this.modelManager.loadGPT2(this.gpt2FilePath, Hyperparameters.GENERATION_MODE, onProgress);
+        }
         model.hyperparameters.outputLength = GPTConsole.GPT2_OUTPUT_LENGTH;
         return model;
       },
-      `Chat replies will be ${GPTConsole.GPT2_OUTPUT_LENGTH} tokens long and take about a minute each, as GPT-2 small is large for plain TypeScript.`
+      `${changeNote}\nChat replies will be ${GPTConsole.GPT2_OUTPUT_LENGTH} tokens long and take about a minute each, as GPT-2 small is large for plain TypeScript.`
     );
   }
 
@@ -865,7 +979,7 @@ class GPTConsole {
    * @param model - The model, in generation mode.
    */
   private useModel(model: GPTModel): void {
-    // The constructor's call has no previous model to carry settings over from.
+    // The first model created has no previous model to carry settings over from.
     if (this.hyperparameters !== undefined) {
       GPTConsole.copyDecodingSettings(this.hyperparameters, model.hyperparameters);
     }
@@ -886,44 +1000,6 @@ class GPTConsole {
    */
   private static isYes(answer: string): boolean {
     return answer.toLowerCase() === "y" || answer.toLowerCase() === "yes";
-  }
-
-  /**
-   * Checks whether two sets of hyperparameters build models of the same
-   * shape, so that a model built from one can carry on training with the
-   * other.
-   *
-   * @param a - One set of hyperparameters.
-   * @param b - The other.
-   * @returns True if every setting that decides the shape of the model's weights is the same.
-   */
-  private static sameArchitecture(a: Hyperparameters, b: Hyperparameters): boolean {
-    return (
-      a.embeddingSize === b.embeddingSize &&
-      a.numberAttentionHeads === b.numberAttentionHeads &&
-      a.numberTransformerBlocks === b.numberTransformerBlocks &&
-      a.contextLength === b.contextLength &&
-      a.qkvBias === b.qkvBias &&
-      a.feedForwardBias === b.feedForwardBias
-    );
-  }
-
-  /**
-   * Copies the settings that control training, but not the shape of the
-   * model, from one set of hyperparameters to another. The current model's
-   * components keep a reference to their Hyperparameters, so the new values
-   * take effect at the next training.
-   *
-   * @param from - The hyperparameters planned for the new training.
-   * @param to - The hyperparameters the current model was built with.
-   */
-  private static copyTrainingSettings(from: Hyperparameters, to: Hyperparameters): void {
-    to.numberTrainingStories = from.numberTrainingStories;
-    to.numberValidationStories = from.numberValidationStories;
-    to.numberEpochs = from.numberEpochs;
-    to.batchSize = from.batchSize;
-    to.learningRate = from.learningRate;
-    to.outputLength = from.outputLength;
   }
 
   /**

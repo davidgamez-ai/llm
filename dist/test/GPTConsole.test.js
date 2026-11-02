@@ -14,37 +14,38 @@ const writeStoriesCsv = (stories) => {
     fs.writeFileSync(filePath, "text\n" + stories.map((story) => `"${story}"`).join("\n") + "\n", "utf-8");
     return filePath;
 };
-// Enough for three runs of 8 stories each, since each run continues with new stories.
-const STORIES = Array.from({ length: 24 }, (_, i) => `Once upon a time there was a cat called Tom ${i}. The end.`);
-/** The hours each test's console was asked to build hyperparameters for, in order. */
-let requestedHours = [];
+// Enough for three runs of 10 stories each, since each run continues with new stories.
+const STORIES = Array.from({ length: 30 }, (_, i) => `Once upon a time there was a cat called Tom ${i}. The end.`);
+/** The sizes each test's console was asked to build hyperparameters for, in order. */
+let requestedSizes = [];
 /**
- * A tiny stand-in for Hyperparameters.forReducedTraining, so the tests run
- * quickly. Like the real one, it uses a wider model from 20 hours: 8 values
- * wide below 20 hours and 16 from 20 hours on. It records the hours asked for.
+ * A tiny stand-in for the model sizes, so the tests run quickly. Like the real
+ * ones, the sizes have different widths: 8 values wide for small and 16 for
+ * medium and large. It records the sizes asked for.
  */
-const tinyHyperparametersForHours = (hours) => {
-    requestedHours.push(hours);
-    const hyperparameters = new Hyperparameters(hours < 20 ? 8 : 16, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
+const tinyHyperparametersForSize = (size) => {
+    requestedSizes.push(size);
+    const hyperparameters = new Hyperparameters(size === "small" ? 8 : 16, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
     hyperparameters.seed = 42;
     hyperparameters.outputLength = 5;
-    hyperparameters.numberTrainingStories = 8;
     hyperparameters.numberValidationStories = 2;
     return hyperparameters;
 };
 /**
- * Runs a GPTConsole with the tiny hyperparameters on the given lines of
- * typed input, and returns everything it wrote. The trainer's own progress
- * messages go to console.log, which is silenced.
+ * Runs a GPTConsole with the tiny hyperparameters on the given lines of typed
+ * input, starting from the question about the size of model, and returns
+ * everything it wrote. The training speed is set so low that every training
+ * run uses the fewest stories, 10. The trainer's own progress messages go to
+ * console.log, which is silenced.
  *
  * @param t - The test context, used to silence console.log.
  * @param typed - The lines the user types, in order.
  * @param trainingFilePath - The training CSV. Defaults to a small file of STORIES.
- * @param gpt2FilePath - The GPT-2 small weights. Defaults to the console's own default, models/gpt2-small.safetensors.
+ * @param gpt2FilePath - The GPT-2 small weights. Defaults to the console's own default, models/gpt2-small-weights.safetensors.
  */
-const runConsole = async (t, typed, trainingFilePath = writeStoriesCsv(STORIES), gpt2FilePath) => {
+const runConsoleFromStart = async (t, typed, trainingFilePath = writeStoriesCsv(STORIES), gpt2FilePath) => {
     t.mock.method(console, "log", () => { });
-    requestedHours = [];
+    requestedSizes = [];
     // Typed input: every line at once, then the end of the input.
     const input = new PassThrough();
     input.end(typed.map((line) => line + "\n").join(""));
@@ -57,7 +58,8 @@ const runConsole = async (t, typed, trainingFilePath = writeStoriesCsv(STORIES),
         },
     });
     const gptConsole = new GPTConsole({
-        hyperparametersForHours: tinyHyperparametersForHours,
+        hyperparametersForSize: tinyHyperparametersForSize,
+        parameterTokensPerHour: 1,
         trainingFilePath,
         validationFilePath: writeStoriesCsv(STORIES.slice(0, 2)),
         gpt2FilePath,
@@ -67,6 +69,11 @@ const runConsole = async (t, typed, trainingFilePath = writeStoriesCsv(STORIES),
     await gptConsole.run();
     return written;
 };
+/**
+ * Runs a GPTConsole as runConsoleFromStart does, choosing the small model at
+ * startup, so the lines typed start at the menu.
+ */
+const runConsole = (t, typed, trainingFilePath, gpt2FilePath) => runConsoleFromStart(t, ["1", ...typed], trainingFilePath, gpt2FilePath);
 /** Counts how many times a pattern appears in the text. */
 const count = (text, pattern) => text.match(new RegExp(pattern.source, "g"))?.length ?? 0;
 test("the menu offers Train, Save model, Load model, Load GPT-2 small weights, Temperature, Sampling method and Chat, in that order, and quit ends the program", async (t) => {
@@ -83,12 +90,66 @@ test("chat shows the model's continuation of each sentence, and quit returns to 
     assert.equal(count(written, /7\. Chat/), 2);
     assert.match(written, /Goodbye\./);
 });
-test("train asks for the hours, passes them on, describes the plan and trains", async (t) => {
+test("storiesForHours() fills the hours, after allowing for validation, using the model's number of parameters", () => {
+    // 10 x 1.35 trillion / 13,675,520 parameters = 987,165 tokens, less 100 x 210 / 3 for validation, over 210 tokens a story.
+    assert.equal(GPTConsole.storiesForHours(10, Hyperparameters.smallModel(), 13675520), 4667);
+    // 50 x 1.35 trillion / 163,037,184 parameters = 414,017 tokens: far fewer tokens an hour than the small model.
+    assert.equal(GPTConsole.storiesForHours(50, Hyperparameters.largeModel(), 163037184), 1938);
+    // The training speed can be given: twice as fast, about twice the stories.
+    assert.equal(GPTConsole.storiesForHours(10, Hyperparameters.smallModel(), 13675520, 2.7e12), 9368);
+});
+test("storiesForHours() gives at least 10 stories, and at least enough for two batches", () => {
+    assert.equal(GPTConsole.storiesForHours(0.001, Hyperparameters.smallModel(), 13675520), 10);
+    // Two batches of 2 windows of 1024 tokens are 4,096 tokens, or 20 stories of 210 tokens.
+    assert.equal(GPTConsole.storiesForHours(0.001, Hyperparameters.largeModel(), 163037184), 20);
+});
+test("the size of model is asked for at startup, repeating until the answer is an option, and a model of that size is created", async (t) => {
+    const written = await runConsoleFromStart(t, ["small", "0", "4", "", "2", "quit"]);
+    assert.match(written, /Model size:\n\s+1\. Small\n\s+2\. Medium\n\s+3\. Large \(GPT-2 small\)\n/);
+    assert.match(written, /"small" is not an option\./);
+    assert.match(written, /"0" is not an option\./);
+    assert.match(written, /"4" is not an option\./);
+    assert.match(written, /"" is not an option\./);
+    assert.equal(count(written, /Choose 1 to 3/), 5);
+    assert.deepEqual(requestedSizes, ["medium"]);
+    assert.match(written, /Created a model with random weights: \d+\.\d million parameters, 16 values wide with 1 transformer blocks\./);
+    assert.match(written, /1\. Train/);
+});
+test("each startup option creates the matching size of model", async (t) => {
+    for (const [choice, size] of [["1", "small"], ["2", "medium"], ["3", "large"]]) {
+        await runConsoleFromStart(t, [choice, "quit"]);
+        assert.deepEqual(requestedSizes, [size]);
+    }
+});
+test("the default sizes create models of the sizes the hyperparameters define", async (t) => {
+    // Only the small model is built: it is the quickest, and the sizes' settings are tested with Hyperparameters.
+    let written = "";
+    const input = new PassThrough();
+    input.end("1\nquit\n");
+    const output = new Writable({
+        write(chunk, _encoding, callback) {
+            written += chunk.toString();
+            callback();
+        },
+    });
+    t.mock.method(console, "log", () => { });
+    await new GPTConsole({ input, output }).run();
+    assert.match(written, /Created a model with random weights: 13\.7 million parameters, 128 values wide with 4 transformer blocks\./);
+});
+test("typing quit at the startup question, or the input ending there, ends the program without showing the menu", async (t) => {
+    for (const typed of [["quit"], ["QUIT"], []]) {
+        const written = await runConsoleFromStart(t, typed);
+        assert.doesNotMatch(written, /1\. Train/);
+        assert.deepEqual(requestedSizes, []);
+        assert.match(written, /Goodbye\./);
+    }
+});
+test("train asks only for the hours, describes the plan and trains the current model", async (t) => {
     const written = await runConsole(t, ["1", "2.5", "7", "Once upon a time", "quit", "quit"]);
-    // The constructor builds the first model for 2.5 hours; the answer typed is passed on too.
-    assert.deepEqual(requestedHours, [2.5, 2.5]);
+    // Only the model created at startup is built.
+    assert.deepEqual(requestedSizes, ["small"]);
     assert.match(written, /How many hours of training\?/);
-    assert.match(written, /Training for about 2\.5 hours: 8 stories \(numbers 1 to 8\), 1 epoch, a model 8 values wide/);
+    assert.match(written, /Training for about 2\.5 hours: 10 stories \(numbers 1 to 10\), 1 epoch, a model 8 values wide/);
     assert.match(written, /Expected to finish at about/);
     assert.match(written, /Training finished\. Training loss: \d+\.\d{3}\. Validation loss: \d+\.\d{3}\./);
     assert.match(written, /trained 1 time\b/);
@@ -104,7 +165,7 @@ test("the hours are asked for again until they are a number greater than 0 and n
     assert.match(written, /"Infinity" is not a number of hours\./);
     // Asked seven times; trained once, with the first sensible answer.
     assert.equal(count(written, /How many hours of training\?/), 7);
-    assert.deepEqual(requestedHours, [2.5, 1]);
+    assert.match(written, /Training for about 1 hour:/);
     assert.match(written, /trained 1 time\b/);
 });
 test("pressing Enter or typing quit when asked for the hours cancels training", async (t) => {
@@ -114,36 +175,17 @@ test("pressing Enter or typing quit when asked for the hours cancels training", 
     assert.match(written, /trained 0 times/);
     assert.match(written, /Goodbye\./);
 });
-test("training again with a model of the same size continues training the same model, on the next stories", async (t) => {
+test("training again continues training the same model, on the next stories", async (t) => {
     const written = await runConsole(t, ["1", "1", "1", "3", "1", "2", "quit"]);
     assert.equal(count(written, /Training finished/), 3);
     assert.match(written, /trained 3 times/);
-    assert.doesNotMatch(written, /Start a new model\?/);
-    // Each run starts where the last one finished.
-    assert.match(written, /numbers 1 to 8\)[\s\S]*numbers 9 to 16\)[\s\S]*numbers 17 to 24\)/);
+    // Each run starts where the last one finished, with no new model.
+    assert.match(written, /numbers 1 to 10\)[\s\S]*numbers 11 to 20\)[\s\S]*numbers 21 to 30\)/);
+    assert.deepEqual(requestedSizes, ["small"]);
 });
-test("training for hours that need a different size of model asks first, and 'n' keeps the trained model", async (t) => {
-    // 1 hour builds the narrow model; 20 hours needs the wider one.
-    const written = await runConsole(t, ["1", "1", "1", "20", "n", "quit"]);
-    assert.match(written, /needs a model 16 values wide, but the current model is 8 wide/);
-    assert.match(written, /Training cancelled; the current model is unchanged\./);
-    assert.equal(count(written, /Training finished/), 1);
-    // The menu's last count is still 1: the trained model was kept.
-    assert.match(written, /trained 1 time\b[\s\S]*trained 1 time\b[\s\S]*Goodbye/);
-});
-test("answering 'y' builds the new model, which starts its training count again", async (t) => {
-    const written = await runConsole(t, ["1", "1", "1", "20", "y", "quit"]);
-    // The new model's trainer starts again from the first story.
-    assert.match(written, /Training for about 20 hours: 8 stories \(numbers 1 to 8\), 1 epoch, a model 16 values wide/);
-    assert.equal(count(written, /Training finished/), 2);
-    // A new model, trained once.
-    assert.match(written, /trained 1 time\b[\s\S]*Goodbye/);
-    assert.doesNotMatch(written, /trained 2 times/);
-});
-test("an untrained model is rebuilt at the new size without asking", async (t) => {
-    const written = await runConsole(t, ["1", "20", "quit"]);
-    assert.doesNotMatch(written, /Start a new model\?/);
-    assert.match(written, /a model 16 values wide/);
+test("train uses the size of model chosen at startup", async (t) => {
+    const written = await runConsoleFromStart(t, ["2", "1", "20", "quit", "y"]);
+    assert.match(written, /Training for about 20 hours: 10 stories \(numbers 1 to 10\), 1 epoch, a model 16 values wide/);
     assert.match(written, /Training finished/);
 });
 test("quitting with an untrained model does not ask for confirmation", async (t) => {
@@ -271,12 +313,14 @@ test("a file that is not a saved model is reported, and the current model is kep
     assert.match(written, /The current model is unchanged\./);
     assert.doesNotMatch(written, /since it was loaded/);
 });
-test("training a loaded model at a different size asks before replacing it", async (t) => {
+test("training a loaded model of another size keeps that model", async (t) => {
     const filePath = path.join(modelFolder(), "model.safetensors");
-    await runConsole(t, ["2", filePath, "quit"]);
-    const written = await runConsole(t, ["3", filePath, "1", "20", "n", "quit"]);
-    assert.match(written, /needs a model 16 values wide, but the current model is 8 wide/);
-    assert.match(written, /Training cancelled; the current model is unchanged\./);
+    // Save a medium model, then load it into a console that started with a small one.
+    await runConsoleFromStart(t, ["2", "2", filePath, "quit"]);
+    const written = await runConsole(t, ["3", filePath, "1", "1", "quit", "y"]);
+    assert.match(written, /Training for about 1 hour: 10 stories \(numbers 1 to 10\), 1 epoch, a model 16 values wide/);
+    assert.match(written, /Training finished/);
+    assert.match(written, /trained 1 time since it was loaded from model\.safetensors/);
 });
 /*
  * Loading GPT-2 small's weights (menu option 4). Loading the real 548 MB
@@ -284,9 +328,9 @@ test("training a loaded model at a different size asks before replacing it", asy
  * the file has not been downloaded.
  */
 test("loading GPT-2 small says how to download the weights when they are missing", async (t) => {
-    const missing = path.join(modelFolder(), "gpt2-small.safetensors");
+    const missing = path.join(modelFolder(), "gpt2-small-weights.safetensors");
     const written = await runConsole(t, ["4", "quit"], undefined, missing);
-    assert.match(written, /The GPT-2 small weights were not found at .*gpt2-small\.safetensors\. Download them with:/);
+    assert.match(written, /The GPT-2 small weights were not found at .*gpt2-small-weights\.safetensors\. Download them with:/);
     assert.match(written, /curl\.exe -L https:\/\/huggingface\.co\/openai-community\/gpt2/);
     assert.doesNotMatch(written, /Loading /);
 });
@@ -297,19 +341,39 @@ test("loading GPT-2 small from a file that is not GPT-2 reports the error and ke
     assert.match(written, /Loading GPT-2 small's weights from .*not-gpt2\.safetensors \(\d+\.\d MB\)/);
     assert.match(written, /Loading failed: .*has no array called wte\.weight/);
     assert.match(written, /The current model is unchanged\./);
+    assert.doesNotMatch(written, /has been replaced with a large model/);
 });
 /*
  * Chat is not tried here: each GPT-2 reply takes about a minute. The
  * generator itself is tested elsewhere.
  */
-test("loading GPT-2 small replaces the model, showing progress, and sets longer replies", { skip: !fs.existsSync(ModelManager.GPT2_SMALL_FILE) && "the GPT-2 small weights have not been downloaded" }, async (t) => {
+const GPT2_MISSING = !fs.existsSync(ModelManager.GPT2_SMALL_FILE) && "the GPT-2 small weights have not been downloaded";
+test("loading GPT-2 small into a large model loads the weights into it, without replacing it", { skip: GPT2_MISSING }, async (t) => {
+    t.mock.method(console, "log", () => { });
+    let written = "";
+    const input = new PassThrough();
+    input.end("3\n4\nquit\n");
+    const output = new Writable({
+        write(chunk, _encoding, callback) {
+            written += chunk.toString();
+            callback();
+        },
+    });
+    await new GPTConsole({ input, output }).run();
+    assert.match(written, /The current model already has GPT-2 small's shape, so the weights were loaded into it\./);
+    assert.doesNotMatch(written, /has been replaced with a large model/);
+    assert.match(written, /Model loaded in \d+\.\d seconds: 163\.0 million parameters/);
+    assert.match(written, /trained 0 times since it was loaded from gpt2-small-weights\.safetensors/);
+});
+test("loading GPT-2 small replaces a smaller model with a large one, says so, shows progress and sets longer replies", { skip: GPT2_MISSING }, async (t) => {
     const written = await runConsole(t, ["1", "1", "4", "y", "quit"]);
+    assert.match(written, /The current model \(8 values wide with 1 transformer blocks\) cannot hold GPT-2 small's weights, so it has been replaced with a large model\./);
     assert.match(written, /trained 1 time since it was last saved, and its training will be lost if another model is loaded\.\nLoad anyway\?/);
-    assert.match(written, /Loading GPT-2 small's weights from .*gpt2-small\.safetensors \(548\.1 MB\)/);
+    assert.match(written, /Loading GPT-2 small's weights from .*gpt2-small-weights\.safetensors \(548\.1 MB\)/);
     assert.match(written, /Loaded: 10% 20% 30% 40% 50% 60% 70% 80% 90% 100%\n/);
     assert.match(written, /Model loaded in \d+\.\d seconds: 163\.0 million parameters, a model 768 values wide with 12 transformer blocks\./);
     assert.match(written, new RegExp(`Chat replies will be ${GPTConsole.GPT2_OUTPUT_LENGTH} tokens long and take about a minute each`));
-    assert.match(written, /trained 0 times since it was loaded from gpt2-small\.safetensors/);
+    assert.match(written, /trained 0 times since it was loaded from gpt2-small-weights\.safetensors/);
 });
 /*
  * Temperature and sampling method (menu options 5 and 6).

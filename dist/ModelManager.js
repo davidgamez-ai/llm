@@ -31,11 +31,11 @@ import Hyperparameters from "./Hyperparameters.js";
 class ModelManager {
     /**
      * The default location of OpenAI's GPT-2 small weights for loadGPT2():
-     * gpt2-small.safetensors in the project's models folder. Found from this
+     * gpt2-small-weights.safetensors in the project's models folder. Found from this
      * compiled file's location (dist/), so it works however the program is
      * launched.
      */
-    static GPT2_SMALL_FILE = path.join(import.meta.dirname, "..", "models", "gpt2-small.safetensors");
+    static GPT2_SMALL_FILE = path.join(import.meta.dirname, "..", "models", "gpt2-small-weights.safetensors");
     /** Where the GPT-2 small weights can be downloaded from, for error messages. */
     static GPT2_SMALL_URL = "https://huggingface.co/openai-community/gpt2/resolve/main/model.safetensors";
     /** The key in the header's "__metadata__" under which the hyperparameters are saved. */
@@ -275,7 +275,7 @@ class ModelManager {
      * Building the model first fills it with random weights, which takes a
      * few seconds, before they are replaced.
      *
-     * @param fileName - The path of the GPT-2 small safetensors file. Defaults to GPT2_SMALL_FILE (models/gpt2-small.safetensors).
+     * @param fileName - The path of the GPT-2 small safetensors file. Defaults to GPT2_SMALL_FILE (models/gpt2-small-weights.safetensors).
      * @param mode - The mode to put the model in. Defaults to GENERATION_MODE.
      * @param onProgress - Optional; called after each of the file's arrays is read.
      * @returns The new model, with GPT-2 small's weights.
@@ -283,6 +283,58 @@ class ModelManager {
      * @throws RangeError if an array the model needs is missing from the file, or has a different shape or number format.
      */
     loadGPT2(fileName = ModelManager.GPT2_SMALL_FILE, mode = Hyperparameters.GENERATION_MODE, onProgress) {
+        // GPT-2 small's hyperparameters are the defaults.
+        const hyperparameters = new Hyperparameters();
+        hyperparameters.mode = mode;
+        return ModelManager.readGPT2(fileName, hyperparameters, () => new GPTModel(hyperparameters), onProgress);
+    }
+    /**
+     * Checks whether a model built from the given hyperparameters has GPT-2
+     * small's shape, so that OpenAI's weights can be loaded into it.
+     *
+     * @param hyperparameters - The hyperparameters to check.
+     * @returns True if every setting that decides the shape of the model's arrays is GPT-2 small's.
+     */
+    static isGPT2SmallShape(hyperparameters) {
+        const current = hyperparameters.toJSON();
+        const gpt2Small = new Hyperparameters().toJSON();
+        return ModelManager.ARCHITECTURE.every((name) => current[name] === gpt2Small[name]);
+    }
+    /**
+     * Loads OpenAI's pretrained GPT-2 small weights into an existing model,
+     * replacing its current weights, without building another model. The weights
+     * are mapped across as in loadGPT2(). The model keeps its own hyperparameters
+     * that do not decide its shape, such as the learning rate and its mode.
+     *
+     * The file is checked before any values are copied, so a file that is not
+     * GPT-2 small leaves the model unchanged.
+     *
+     * @param model - The model to load the weights into, changed in place. Must have GPT-2 small's shape (see isGPT2SmallShape).
+     * @param fileName - The path of the GPT-2 small safetensors file. Defaults to GPT2_SMALL_FILE (models/gpt2-small-weights.safetensors).
+     * @param onProgress - Optional; called after each of the file's arrays is read.
+     * @throws Error if the file does not exist (the message says how to download it), cannot be read or is not a valid safetensors file, or if the computer is big-endian.
+     * @throws RangeError if the model does not have GPT-2 small's shape, or if an array the model needs is missing from the file, or has a different shape or number format.
+     */
+    loadGPT2Weights(model, fileName = ModelManager.GPT2_SMALL_FILE, onProgress) {
+        if (!ModelManager.isGPT2SmallShape(model.hyperparameters)) {
+            throw new RangeError(`ModelManager| The model is ${model.hyperparameters.embeddingSize} values wide with ${model.hyperparameters.numberTransformerBlocks} blocks, so it cannot hold GPT-2 small's weights`);
+        }
+        ModelManager.readGPT2(fileName, model.hyperparameters, () => model, onProgress);
+    }
+    /**
+     * Checks a GPT-2 small safetensors file and copies its weights into a model.
+     * Shared by loadGPT2() and loadGPT2Weights(). See loadGPT2() for how the
+     * file's arrays are mapped onto the model's.
+     *
+     * @param fileName - The path of the GPT-2 small safetensors file.
+     * @param hyperparameters - GPT-2 small's settings, which give the shapes the file's arrays should have.
+     * @param getModel - Provides the model to copy into. Called only once the file has been checked, so that a wrong file is reported before a model is built.
+     * @param onProgress - Optional; called after each of the file's arrays is read.
+     * @returns The model, with GPT-2 small's weights.
+     * @throws Error if the file does not exist (the message says how to download it), cannot be read or is not a valid safetensors file, or if the computer is big-endian.
+     * @throws RangeError if an array the model needs is missing from the file, or has a different shape or number format.
+     */
+    static readGPT2(fileName, hyperparameters, getModel, onProgress) {
         if (!fs.existsSync(fileName)) {
             throw new Error(`ModelManager| The GPT-2 small weights were not found at ${fileName}. ` +
                 `Download them from ${ModelManager.GPT2_SMALL_URL} and save them there, e.g. with: ` +
@@ -292,8 +344,6 @@ class ModelManager {
         const file = fs.openSync(fileName, "r");
         try {
             const { header, dataStart, dataLength } = ModelManager.readHeader(file, fileName);
-            // GPT-2 small's hyperparameters are the defaults.
-            const hyperparameters = new Hyperparameters();
             const { embeddingSize, numberTransformerBlocks, weightMatrixColumns } = hyperparameters;
             /*
              * Find and check every array before building the model, so that a
@@ -322,8 +372,7 @@ class ModelManager {
             }
             entries.set("ln_f.weight", entry("ln_f.weight", [embeddingSize]));
             entries.set("ln_f.bias", entry("ln_f.bias", [embeddingSize]));
-            hyperparameters.mode = mode;
-            const model = new GPTModel(hyperparameters);
+            const model = getModel();
             // Reads one of the file's arrays straight into a Float32Array (a new one if none is given), reporting progress.
             const bytesTotal = [...entries.values()].reduce((sum, { data_offsets: [start, end] }) => sum + end - start, 0);
             let bytesRead = 0;

@@ -120,7 +120,7 @@ test("load() accepts a model whose training hyperparameters differ from the file
 });
 
 test("Hyperparameters.fromJSON() rebuilds the values written by toJSON(), with or without a seed", () => {
-  const hyperparameters = Hyperparameters.forReducedTraining(3);
+  const hyperparameters = Hyperparameters.smallModel();
   hyperparameters.qkvBias = false;
   assert.deepEqual(Hyperparameters.fromJSON(JSON.parse(JSON.stringify(hyperparameters))).toJSON(), hyperparameters.toJSON());
 
@@ -177,10 +177,10 @@ test("loadModel() explains that a file without saved hyperparameters needs load(
  * repository, so these tests are skipped when it has not been downloaded.
  */
 
-const GPT2_MISSING: string | false = !fs.existsSync(ModelManager.GPT2_SMALL_FILE) && "models/gpt2-small.safetensors has not been downloaded";
+const GPT2_MISSING: string | false = !fs.existsSync(ModelManager.GPT2_SMALL_FILE) && "models/gpt2-small-weights.safetensors has not been downloaded";
 
-test("the default GPT-2 small file is gpt2-small.safetensors in the project's models folder", () => {
-  assert.equal(path.basename(ModelManager.GPT2_SMALL_FILE), "gpt2-small.safetensors");
+test("the default GPT-2 small file is gpt2-small-weights.safetensors in the project's models folder", () => {
+  assert.equal(path.basename(ModelManager.GPT2_SMALL_FILE), "gpt2-small-weights.safetensors");
   assert.equal(path.basename(path.dirname(ModelManager.GPT2_SMALL_FILE)), "models");
   // The models folder is beside dist/, at the root of the project.
   assert.ok(fs.existsSync(path.join(path.dirname(ModelManager.GPT2_SMALL_FILE), "..", "package.json")));
@@ -191,7 +191,7 @@ test("the GPT-2 small weights are present in the models folder", { skip: GPT2_MI
 });
 
 test("loadGPT2() explains how to download the weights when the file does not exist", () => {
-  const fileName = path.join(os.tmpdir(), "no-such-folder", "gpt2-small.safetensors");
+  const fileName = path.join(os.tmpdir(), "no-such-folder", "gpt2-small-weights.safetensors");
   assert.throws(() => new ModelManager().loadGPT2(fileName), /were not found at .*Download them from https:\/\/huggingface\.co/);
 });
 
@@ -228,6 +228,46 @@ test("loadGPT2() loads GPT-2 small, which predicts English text far better than 
    * Marseille), " Paris" and " Lyon", in that order.
    */
   model.hyperparameters.mode = Hyperparameters.GENERATION_MODE;
+  const tokenizer = new BPETokenizer();
+  const next = model.update(tokenizer.encode("The capital of France is the city of"))[0];
+  const topThree = [...next.keys()].sort((a, b) => next[b] - next[a]).slice(0, 3);
+  assert.deepEqual(topThree.map((id) => tokenizer.decode([id])), [" Marse", " Paris", " Lyon"]);
+});
+
+test("isGPT2SmallShape() accepts only hyperparameters with GPT-2 small's shape", () => {
+  assert.equal(ModelManager.isGPT2SmallShape(new Hyperparameters()), true);
+  assert.equal(ModelManager.isGPT2SmallShape(Hyperparameters.largeModel()), true);
+  assert.equal(ModelManager.isGPT2SmallShape(Hyperparameters.smallModel()), false);
+  assert.equal(ModelManager.isGPT2SmallShape(Hyperparameters.mediumModel()), false);
+
+  // Settings that do not decide the shape make no difference; the biases do.
+  const differentTraining = new Hyperparameters();
+  differentTraining.learningRate = 0.01;
+  assert.equal(ModelManager.isGPT2SmallShape(differentTraining), true);
+  const noBiases = new Hyperparameters();
+  noBiases.qkvBias = false;
+  assert.equal(ModelManager.isGPT2SmallShape(noBiases), false);
+});
+
+test("loadGPT2Weights() rejects a model without GPT-2 small's shape, leaving it unchanged", () => {
+  const model = createModel(1);
+  const before = copyParameters(model);
+
+  assert.throws(() => new ModelManager().loadGPT2Weights(model, ModelManager.GPT2_SMALL_FILE), /cannot hold GPT-2 small's weights/);
+  assert.deepEqual(copyParameters(model), before);
+});
+
+test("loadGPT2Weights() loads GPT-2 small into an existing model, which keeps its own settings", { skip: GPT2_MISSING }, () => {
+  const hyperparameters = new Hyperparameters();
+  hyperparameters.mode = Hyperparameters.GENERATION_MODE;
+  hyperparameters.learningRate = 0.123;
+  const model = new GPTModel(hyperparameters);
+
+  new ModelManager().loadGPT2Weights(model);
+
+  assert.equal(model.hyperparameters.learningRate, 0.123);
+  assert.equal(model.hyperparameters.mode, Hyperparameters.GENERATION_MODE);
+  // The same check as for loadGPT2(): any mistake in the weights changes the most likely next tokens.
   const tokenizer = new BPETokenizer();
   const next = model.update(tokenizer.encode("The capital of France is the city of"))[0];
   const topThree = [...next.keys()].sort((a, b) => next[b] - next[a]).slice(0, 3);
