@@ -10,6 +10,7 @@ console.run();
 // import GPTModel from "./GPTModel.js";
 // import Generator from "./Generator.js";
 // import Trainer from "./Trainer.js";
+// import TinyStoriesDataset from "./TinyStoriesDataset.js";
 
 // /*
 //  * Path to the training text, resolved from the location of this compiled file
@@ -39,7 +40,7 @@ console.run();
 
 // // Train model
 // const trainer:Trainer = new Trainer(hyperparameters, model);
-// trainer.loadTinyStories("data/TinyStories_train.csv", "data/TinyStories_validation.csv");
+// trainer.load(new TinyStoriesDataset("data/TinyStories_train.csv", "data/TinyStories_validation.csv"));
 // trainer.train();
 
 // //Output completion after model is trained.

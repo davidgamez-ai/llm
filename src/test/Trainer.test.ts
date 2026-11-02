@@ -7,6 +7,9 @@ import Hyperparameters from "../Hyperparameters.js";
 import GPTModel from "../GPTModel.js";
 import Trainer from "../Trainer.js";
 import BPETokenizer from "../BPETokenizer.js";
+import { Dataset, Window, createWindows } from "../Dataset.js";
+import TextDataset from "../TextDataset.js";
+import { checkGradients } from "./GradientCheck.js";
 
 /*
  * Writes text to a new file in a temporary folder and returns its path, so
@@ -70,11 +73,11 @@ const setUp = (numberEpochs: number = 1, text: string = TEXT) => {
   };
 
   const trainer = new Trainer(hyperparameters, model);
-  trainer.load(writeTempFile(text));
+  trainer.load(new TextDataset(writeTempFile(text)));
   return { hyperparameters, model, trainer, calls, trainingCalls };
 };
 
-test("load() splits the text 90/10 by characters before tokenizing", () => {
+test("train() trains on every full batch of the training windows and validates on every validation window", () => {
   const { trainer, calls } = setUp();
   const tokenizer = new BPETokenizer();
   const splitIndex = Math.floor(0.9 * TEXT.length);
@@ -187,9 +190,61 @@ test("training on short, repetitive text drives the loss far below that of an un
   assert.ok(losses[losses.length - 1].validationLoss < 3, `final validation loss ${losses[losses.length - 1].validationLoss}`);
 });
 
-/** Reads the trainer's private token arrays, to check what load() produced. */
-const loadedTokens = (trainer: Trainer) =>
-  trainer as unknown as { trainingTokens: number[]; validationTokens: number[] };
+test("with windows of different lengths, a batch's gradients are those of the mean loss per token that it reports", () => {
+  // No dropout, so the loss only changes when the weights do.
+  const hyperparameters = new Hyperparameters(8, 4, 0, Hyperparameters.TRAINING_MODE, 2, 1, 3);
+  hyperparameters.seed = 42;
+  const model = new GPTModel(hyperparameters);
+
+  // The check compares gradients at one set of weights, so the update at the end of the batch is switched off.
+  model.updateWeights = () => {};
+
+  const internals = new Trainer(hyperparameters, model) as unknown as {
+    trainOnBatch(batch: { inputs: number[]; targets: number[] }[]): number;
+    calculateBatchLoss(batch: { inputs: number[]; targets: number[] }[]): number;
+  };
+  const batch = [
+    { inputs: [464, 3290], targets: [3290, 318] },
+    { inputs: [318, 257, 1000, 464], targets: [257, 1000, 464, 3290] },
+  ];
+
+  assert.ok(Math.abs(internals.trainOnBatch(batch) - internals.calculateBatchLoss(batch)) <= 1e-9);
+
+  /*
+   * checkGradients uses the made-up loss R * (mean loss), but trainOnBatch()
+   * always calculates the gradients of the mean loss itself, so the gradients
+   * are multiplied by R before they are compared.
+   */
+  let multiplier = 0;
+  const scaled = (gradients: () => ArrayLike<number>) => () => Array.from(gradients(), (gradient) => gradient * multiplier);
+  const lastBlock = model.transformers[model.transformers.length - 1];
+
+  const checked = checkGradients({
+    forward: () => [[internals.calculateBatchLoss(batch)]],
+    backward: (outputErrors) => {
+      multiplier = outputErrors[0][0];
+      internals.trainOnBatch(batch);
+    },
+    parameters: [
+      // Positions 2 and 3 are only used by the longer window, so a wrong balance between the windows shows up here.
+      { name: "position embedding", values: model.embedding.positionEmbeddingMatrix.data, gradients: scaled(() => model.embedding.positionEmbeddingGradients.data) },
+      { name: "feed forward secondLayerWeights", values: lastBlock.feedForward.secondLayerWeights.data, gradients: scaled(() => lastBlock.feedForward.secondLayerWeightGradients.data) },
+      { name: "output layer", values: model.linearOutputLayer.weights.getRow(3290), gradients: scaled(() => model.linearOutputLayer.weightGradients.getRow(3290)) },
+    ],
+    // The same step and tolerance as the whole-model check in GPTModel.test.ts, for the same reasons.
+    step: 1e-4,
+    absoluteTolerance: 1e-9,
+  });
+
+  assert.ok(checked > 0);
+});
+
+/** Reads the trainer's private windows, to check what load() produced. */
+const loadedWindows = (trainer: Trainer) =>
+  trainer as unknown as { trainingWindows: Window[]; validationWindows: Window[] };
+
+/** The windows setUp() and the tests below expect tokens to be cut into, with contextLength 4. */
+const windowsOf = (tokens: number[]): Window[] => createWindows(tokens, 4);
 
 /** The tokens of the training and validation parts of one text, split 90/10 by characters. */
 const split = (text: string) => {
@@ -198,158 +253,92 @@ const split = (text: string) => {
   return { training: tokenizer.encode(text.slice(0, splitIndex)), validation: tokenizer.encode(text.slice(splitIndex)) };
 };
 
-test("load() with several files splits each file 90/10 and joins the parts with <|endoftext|>", () => {
-  const first = sentences(30);
-  const second = "A different book about other things, which goes on for a while. ".repeat(20);
-  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
-  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
-  const endOfText = new BPETokenizer().endOfTextId;
-
-  trainer.load([writeTempFile(first), writeTempFile(second)]);
-
-  // Each set holds the matching part of every file, in order, separated by the end-of-text token.
-  const a = split(first);
-  const b = split(second);
-  assert.deepEqual(loadedTokens(trainer).trainingTokens, [...a.training, endOfText, ...b.training]);
-  assert.deepEqual(loadedTokens(trainer).validationTokens, [...a.validation, endOfText, ...b.validation]);
-});
-
-test("load() gives the same tokens for one path as for an array holding that path", () => {
-  const filePath = writeTempFile(TEXT);
-  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
-  const single = new Trainer(hyperparameters, new GPTModel(hyperparameters));
-  const array = new Trainer(hyperparameters, new GPTModel(hyperparameters));
-
-  single.load(filePath);
-  array.load([filePath]);
-
-  assert.deepEqual(loadedTokens(array).trainingTokens, loadedTokens(single).trainingTokens);
-  assert.deepEqual(loadedTokens(array).validationTokens, loadedTokens(single).validationTokens);
-  // And no end-of-text token is added for a single file.
-  assert.deepEqual(loadedTokens(single).trainingTokens, split(TEXT).training);
-});
-
-test("load() replaces previously loaded tokens", () => {
+test("load() replaces previously loaded windows", () => {
   const { trainer } = setUp();
 
-  trainer.load(writeTempFile(sentences(10)));
+  trainer.load(new TextDataset(writeTempFile(sentences(10))));
 
-  assert.deepEqual(loadedTokens(trainer).trainingTokens, split(sentences(10)).training);
+  assert.deepEqual(loadedWindows(trainer).trainingWindows, windowsOf(split(sentences(10)).training));
 });
 
-test("load() rejects an empty array of files", () => {
-  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
-  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+test("load() cuts the windows when it is called, so a later change to contextLength does not affect them", () => {
+  const { hyperparameters, trainer } = setUp();
+  const before = loadedWindows(trainer).trainingWindows;
 
-  assert.throws(() => trainer.load([]), /at least one file/);
+  hyperparameters.contextLength = 3;
+
+  assert.equal(loadedWindows(trainer).trainingWindows, before);
+  assert.ok(before.every((window) => window.inputs.length === 4));
 });
 
-/** Writes a CSV file in the TinyStories format: a "text" column with one quoted story per record. */
-const writeStoriesCsv = (stories: string[]): string =>
-  writeTempFile("text\n" + stories.map((story) => `"${story.replace(/"/g, '""')}"`).join("\n") + "\n");
-
-/** Builds count numbered stories, each containing a quote and a line break as real TinyStories do. */
-const makeStories = (count: number, label: string): string[] =>
-  Array.from({ length: count }, (_, i) => `${label} story ${i}. Tom said, "Hello ${i}!"\n\nThe end.`);
-
-test("loadTinyStories() loads the first numberTrainingStories and numberValidationStories, joined with <|endoftext|>", () => {
-  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
-  hyperparameters.numberTrainingStories = 3;
-  hyperparameters.numberValidationStories = 2;
-  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
-  const trainingStories = makeStories(5, "Training");
-  const validationStories = makeStories(4, "Validation");
-  const tokenizer = new BPETokenizer();
-  const endOfText = tokenizer.endOfTextId;
-
-  trainer.loadTinyStories(writeStoriesCsv(trainingStories), writeStoriesCsv(validationStories));
-
-  // Only the first 3 and 2 stories, each encoded separately, with the end-of-text token between them.
-  const [t0, t1, t2] = trainingStories.map((story) => tokenizer.encode(story));
-  const [v0, v1] = validationStories.map((story) => tokenizer.encode(story));
-  assert.deepEqual(loadedTokens(trainer).trainingTokens, [...t0, endOfText, ...t1, endOfText, ...t2]);
-  assert.deepEqual(loadedTokens(trainer).validationTokens, [...v0, endOfText, ...v1]);
-});
-
-test("each loadTinyStories() call continues with the next training stories, but always uses the same validation stories", () => {
-  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
-  hyperparameters.numberTrainingStories = 2;
-  hyperparameters.numberValidationStories = 1;
-  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
-  const trainingStories = makeStories(6, "Training");
-  const trainingFile = writeStoriesCsv(trainingStories);
-  const validationFile = writeStoriesCsv(makeStories(3, "Validation"));
-  const tokenizer = new BPETokenizer();
-  const endOfText = tokenizer.endOfTextId;
-  const [t0, t1, t2, t3] = trainingStories.map((story) => tokenizer.encode(story));
-
-  assert.equal(trainer.tinyStoriesLoaded, 0);
-  trainer.loadTinyStories(trainingFile, validationFile);
-  const firstValidation = [...loadedTokens(trainer).validationTokens];
-  assert.deepEqual(loadedTokens(trainer).trainingTokens, [...t0, endOfText, ...t1]);
-  assert.equal(trainer.tinyStoriesLoaded, 2);
-
-  trainer.loadTinyStories(trainingFile, validationFile);
-  assert.deepEqual(loadedTokens(trainer).trainingTokens, [...t2, endOfText, ...t3]);
-  assert.deepEqual(loadedTokens(trainer).validationTokens, firstValidation);
-  assert.equal(trainer.tinyStoriesLoaded, 4);
-});
-
-test("loadTinyStories() warns when the training file runs out of new stories", (t) => {
-  const warnings: string[] = [];
-  t.mock.method(console, "warn", (message: string) => warnings.push(message));
-  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
-  hyperparameters.numberTrainingStories = 2;
-  hyperparameters.numberValidationStories = 1;
-  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
-  const trainingFile = writeStoriesCsv(makeStories(3, "Training"));
-  const validationFile = writeStoriesCsv(makeStories(1, "Validation"));
-
-  trainer.loadTinyStories(trainingFile, validationFile);
-  trainer.loadTinyStories(trainingFile, validationFile);
-
-  // Only story 3 was left for the second call.
-  assert.equal(trainer.tinyStoriesLoaded, 3);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /only 1 stories after the first 2; 2 were requested/);
-});
-
-test("loadTinyStories() uses every story, with a warning, when a file has fewer than requested", (t) => {
-  const warnings: string[] = [];
-  t.mock.method(console, "warn", (message: string) => warnings.push(message));
-  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
-  hyperparameters.numberTrainingStories = 10;
-  hyperparameters.numberValidationStories = 1;
-  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
-  const endOfText = new BPETokenizer().endOfTextId;
-
-  trainer.loadTinyStories(writeStoriesCsv(makeStories(2, "Training")), writeStoriesCsv(makeStories(3, "Validation")));
-
-  // Two training stories means exactly one end-of-text token; one validation story means none.
-  assert.equal(loadedTokens(trainer).trainingTokens.filter((token) => token === endOfText).length, 1);
-  assert.equal(loadedTokens(trainer).validationTokens.filter((token) => token === endOfText).length, 0);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /only 2 stories; 10 were requested/);
-});
-
-test("after loadTinyStories(), train() trains on the stories", () => {
-  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.GENERATION_MODE, 2, 1, 3);
-  hyperparameters.numberTrainingStories = 6;
-  hyperparameters.numberValidationStories = 2;
+test("load(dataset) trains on the windows the dataset prepares, passing it the settings and a tokenizer", () => {
+  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.GENERATION_MODE, 2, 1, 2);
   hyperparameters.seed = 42;
-  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
-  trainer.loadTinyStories(writeStoriesCsv(makeStories(6, "Training")), writeStoriesCsv(makeStories(2, "Validation")));
+  const model = new GPTModel(hyperparameters);
+  const calls: { inputs: number[]; mode: number }[] = [];
+  const update = model.update.bind(model);
+  model.update = (inputs: number[]) => {
+    calls.push({ inputs: [...inputs], mode: hyperparameters.mode });
+    return update(inputs);
+  };
+  const trainer = new Trainer(hyperparameters, model);
 
+  // The windows differ in length, which only a dataset can produce, and which the training loop must accept.
+  const training: Window[] = [
+    { inputs: [1, 2], targets: [2, 3] },
+    { inputs: [4, 5, 6], targets: [5, 6, 7] },
+  ];
+  const validation: Window[] = [{ inputs: [8], targets: [9] }];
+  const received: { hyperparameters: Hyperparameters; tokenizer: BPETokenizer }[] = [];
+  const dataset: Dataset = {
+    load: (settings, tokenizer) => {
+      received.push({ hyperparameters: settings, tokenizer });
+      return { training, validation };
+    },
+  };
+
+  trainer.load(dataset);
   const losses = trainer.train();
 
-  assert.equal(losses.length, 1);
+  assert.equal(received.length, 1);
+  assert.equal(received[0].hyperparameters, hyperparameters);
+  assert.ok(received[0].tokenizer instanceof BPETokenizer);
   assert.ok(Number.isFinite(losses[0].trainingLoss) && Number.isFinite(losses[0].validationLoss));
+  const inputsIn = (mode: number) => calls.filter((call) => call.mode === mode).map((call) => call.inputs);
+  assert.deepEqual(inputsIn(Hyperparameters.TRAINING_MODE).sort((a, b) => a.length - b.length), [[1, 2], [4, 5, 6]]);
+  assert.deepEqual(inputsIn(Hyperparameters.VALIDATION_MODE), [[8]]);
+});
+
+test("trainingWindowLength lets a short text train on a model with a long context, which would otherwise have no windows", () => {
+  const hyperparameters = new Hyperparameters(8, 1024, 0.1, Hyperparameters.GENERATION_MODE, 2, 1, 3);
+  hyperparameters.seed = 42;
+  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+  const dataset = new TextDataset(writeTempFile(TEXT));
+
+  trainer.load(dataset);
+  assert.throws(() => trainer.train(), /at least batchSize/);
+
+  hyperparameters.trainingWindowLength = 8;
+  trainer.load(dataset);
+  const losses = trainer.train();
+
+  assert.ok(Number.isFinite(losses[0].trainingLoss) && Number.isFinite(losses[0].validationLoss));
+  assert.ok(loadedWindows(trainer).trainingWindows.every((window) => window.inputs.length === 8));
+  assert.equal(hyperparameters.contextLength, 1024);
+});
+
+test("train() throws a clear error when a dataset gives no validation windows", () => {
+  const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 1);
+  const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
+  trainer.load({ load: () => ({ training: [{ inputs: [1], targets: [2] }], validation: [] }) });
+
+  assert.throws(() => trainer.train(), /validation set has no windows/);
 });
 
 test("train() throws a clear error when there is not enough text for one batch", () => {
   const hyperparameters = new Hyperparameters(8, 4, 0.1, Hyperparameters.TRAINING_MODE, 2, 1, 3);
   const trainer = new Trainer(hyperparameters, new GPTModel(hyperparameters));
-  trainer.load(writeTempFile("Far too short."));
+  trainer.load(new TextDataset(writeTempFile("Far too short.")));
 
   assert.throws(() => trainer.train(), /at least batchSize/);
 });

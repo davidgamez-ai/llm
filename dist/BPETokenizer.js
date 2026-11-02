@@ -69,7 +69,14 @@ class BPETokenizer {
             if (i > 0) {
                 ids.push(BPETokenizer.END_OF_TEXT_ID);
             }
-            ids.push(...encode(pieces[i]));
+            /*
+             * Appended with a loop rather than push(...encode(pieces[i])), because
+             * spreading passes every id as a separate argument, which overflows the
+             * call stack above about 125,000 tokens.
+             */
+            for (const id of encode(pieces[i])) {
+                ids.push(id);
+            }
         }
         return ids;
     }

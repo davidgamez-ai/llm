@@ -105,6 +105,18 @@ test("Hyperparameters.fromJSON() rebuilds the values written by toJSON(), with o
     assert.equal(rebuilt.seed, 99);
     assert.equal(rebuilt.weightMatrixColumns, hyperparameters.weightMatrixColumns);
 });
+test("a model with a trainingWindowLength shorter than its contextLength saves and reloads, keeping both", () => {
+    const fileName = temporaryFile();
+    const hyperparameters = new Hyperparameters(8, 1024, 0, Hyperparameters.VALIDATION_MODE, 2, 1);
+    hyperparameters.seed = 1;
+    hyperparameters.trainingWindowLength = 128;
+    const saved = new GPTModel(hyperparameters);
+    new ModelManager().save(saved, fileName);
+    const loaded = new ModelManager().loadModel(fileName);
+    assert.equal(loaded.hyperparameters.contextLength, 1024);
+    assert.equal(loaded.hyperparameters.trainingWindowLength, 128);
+    assert.deepEqual(copyParameters(loaded), copyParameters(saved));
+});
 test("Hyperparameters.fromJSON() validates the values", () => {
     assert.throws(() => Hyperparameters.fromJSON({ embeddingSize: 10, numberAttentionHeads: 3 }), RangeError);
     assert.throws(() => Hyperparameters.fromJSON({ qkvBias: "yes" }), TypeError);

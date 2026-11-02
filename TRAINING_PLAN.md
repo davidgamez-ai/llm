@@ -14,6 +14,10 @@ It is written as a sequence of small steps. Each step:
 Part A sets out the conventions every step follows. Part B is the steps.
 Part C is reference material (dnn mapping, configuration, optional extras).
 
+Since this plan was written, the code that loads training data has moved out of
+`Trainer` into `TextDataset`, `TinyStoriesDataset` and `AlpacaDataset`, which
+`Trainer.load()` now accepts. See `DATASET_PLAN.md`.
+
 ---
 
 # Part A: Conventions

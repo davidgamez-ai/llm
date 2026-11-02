@@ -48,7 +48,7 @@ test("smallModel() has the architecture and training settings of the small model
   assert.equal(hyperparameters.outputLength, 50);
   // Unchanged from the defaults.
   assert.equal(hyperparameters.vocabularySize, 50257);
-  assert.equal(hyperparameters.numberValidationStories, 100);
+  assert.equal(hyperparameters.numberValidationExamples, 100);
   assert.equal(hyperparameters.qkvBias, true);
   assert.equal(hyperparameters.mode, Hyperparameters.TRAINING_MODE);
 });
@@ -86,9 +86,9 @@ test("largeModel() matches GPT-2 small", () => {
 
 test("the model sizes return a new instance each time, leaving the GPT-2 small defaults alone", () => {
   const first = Hyperparameters.smallModel();
-  first.numberTrainingStories = 10;
+  first.numberTrainingExamples = 10;
 
-  assert.equal(Hyperparameters.smallModel().numberTrainingStories, 1000);
+  assert.equal(Hyperparameters.smallModel().numberTrainingExamples, 1000);
   assert.equal(new Hyperparameters().embeddingSize, 768);
 });
 
@@ -307,6 +307,56 @@ test("positionEmbeddingStandardDeviation setter accepts 0 and positive finite va
 const draw = (hyperparameters: Hyperparameters, count: number): number[] =>
   Array.from({ length: count }, () => hyperparameters.random());
 
+test("trainingWindowLength is contextLength until it is set, and follows contextLength while unset", () => {
+  const hyperparameters = new Hyperparameters(8, 64, 0.1, Hyperparameters.TRAINING_MODE, 2);
+  assert.equal(hyperparameters.trainingWindowLength, 64);
+
+  hyperparameters.contextLength = 32;
+  assert.equal(hyperparameters.trainingWindowLength, 32);
+});
+
+test("trainingWindowLength is never more than contextLength", () => {
+  const hyperparameters = new Hyperparameters(8, 64, 0.1, Hyperparameters.TRAINING_MODE, 2);
+
+  hyperparameters.trainingWindowLength = 16;
+  assert.equal(hyperparameters.trainingWindowLength, 16);
+
+  hyperparameters.trainingWindowLength = 1000;
+  assert.equal(hyperparameters.trainingWindowLength, 64);
+});
+
+test("setting trainingWindowLength to undefined goes back to contextLength", () => {
+  const hyperparameters = new Hyperparameters(8, 64, 0.1, Hyperparameters.TRAINING_MODE, 2);
+
+  hyperparameters.trainingWindowLength = 16;
+  hyperparameters.trainingWindowLength = undefined;
+
+  assert.equal(hyperparameters.trainingWindowLength, 64);
+});
+
+test("trainingWindowLength rejects invalid values, leaving state unchanged", () => {
+  const hyperparameters = new Hyperparameters(8, 64, 0.1, Hyperparameters.TRAINING_MODE, 2);
+  hyperparameters.trainingWindowLength = 16;
+
+  for (const value of [0, -1, 1.5, NaN, Infinity]) {
+    assert.throws(() => { hyperparameters.trainingWindowLength = value; }, RangeError, `accepted ${value}`);
+  }
+  assert.equal(hyperparameters.trainingWindowLength, 16);
+  assert.throws(() => Hyperparameters.fromJSON({ trainingWindowLength: 0 }), RangeError);
+});
+
+test("toJSON() leaves out trainingWindowLength when it is unset, and fromJSON() restores it when it is set", () => {
+  const hyperparameters = new Hyperparameters(8, 64, 0.1, Hyperparameters.TRAINING_MODE, 2);
+  assert.ok(!("trainingWindowLength" in JSON.parse(JSON.stringify(hyperparameters))));
+
+  // A saved value above contextLength is kept as it was set, not as the getter limits it.
+  hyperparameters.trainingWindowLength = 1000;
+  assert.equal(JSON.parse(JSON.stringify(hyperparameters)).trainingWindowLength, 1000);
+
+  hyperparameters.trainingWindowLength = 16;
+  assert.equal(Hyperparameters.fromJSON(JSON.parse(JSON.stringify(hyperparameters))).trainingWindowLength, 16);
+});
+
 test("seed defaults to undefined", () => {
   assert.equal(new Hyperparameters().seed, undefined);
 });
@@ -424,40 +474,40 @@ test("the optimizer hyperparameter setters reject invalid values, leaving state 
   assert.equal(hyperparameters.weightDecay, 0.1);
 });
 
-test("numberTrainingStories defaults to 1000 and numberValidationStories to 100", () => {
+test("numberTrainingExamples defaults to 1000 and numberValidationExamples to 100", () => {
   const hyperparameters = new Hyperparameters();
 
-  assert.equal(hyperparameters.numberTrainingStories, 1000);
-  assert.equal(hyperparameters.numberValidationStories, 100);
+  assert.equal(hyperparameters.numberTrainingExamples, 1000);
+  assert.equal(hyperparameters.numberValidationExamples, 100);
 });
 
-test("the story count setters store positive whole numbers", () => {
+test("the example count setters store positive whole numbers", () => {
   const hyperparameters = new Hyperparameters();
 
-  hyperparameters.numberTrainingStories = 5000;
-  hyperparameters.numberValidationStories = 1;
+  hyperparameters.numberTrainingExamples = 5000;
+  hyperparameters.numberValidationExamples = 1;
 
-  assert.equal(hyperparameters.numberTrainingStories, 5000);
-  assert.equal(hyperparameters.numberValidationStories, 1);
+  assert.equal(hyperparameters.numberTrainingExamples, 5000);
+  assert.equal(hyperparameters.numberValidationExamples, 1);
 });
 
-test("the story count setters reject invalid values, leaving state unchanged", () => {
+test("the example count setters reject invalid values, leaving state unchanged", () => {
   const hyperparameters = new Hyperparameters();
 
   for (const value of NON_POSITIVE_INTEGERS) {
-    assert.throws(() => { hyperparameters.numberTrainingStories = value; }, RangeError, `numberTrainingStories accepted ${value}`);
-    assert.throws(() => { hyperparameters.numberValidationStories = value; }, RangeError, `numberValidationStories accepted ${value}`);
+    assert.throws(() => { hyperparameters.numberTrainingExamples = value; }, RangeError, `numberTrainingExamples accepted ${value}`);
+    assert.throws(() => { hyperparameters.numberValidationExamples = value; }, RangeError, `numberValidationExamples accepted ${value}`);
   }
 
-  assert.equal(hyperparameters.numberTrainingStories, 1000);
-  assert.equal(hyperparameters.numberValidationStories, 100);
+  assert.equal(hyperparameters.numberTrainingExamples, 1000);
+  assert.equal(hyperparameters.numberValidationExamples, 100);
 });
 
-test("the constructor rejects invalid story counts", () => {
-  // Arguments 22 and 23 are numberTrainingStories and numberValidationStories.
-  const build = (numberTrainingStories: number, numberValidationStories: number) =>
+test("the constructor rejects invalid example counts", () => {
+  // Arguments 22 and 23 are numberTrainingExamples and numberValidationExamples.
+  const build = (numberTrainingExamples: number, numberValidationExamples: number) =>
     new Hyperparameters(768, 12, 0.1, Hyperparameters.TRAINING_MODE, 12, 12, 2, false, true,
-      0.01, 0.02, 0.02, 0.02, 2, 0.9, 1, 0.0004, 0.9, 0.999, 1e-8, 0.1, numberTrainingStories, numberValidationStories);
+      0.01, 0.02, 0.02, 0.02, 2, 0.9, 1, 0.0004, 0.9, 0.999, 1e-8, 0.1, numberTrainingExamples, numberValidationExamples);
 
   assert.doesNotThrow(() => build(10, 2));
   assert.throws(() => build(0, 2), RangeError);

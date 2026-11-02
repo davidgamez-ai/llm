@@ -40,3 +40,10 @@ test("encode() of joined documents equals the documents encoded separately, join
 test("encode() of text without <|endoftext|> is unchanged", () => {
     assert.deepEqual(new BPETokenizer().encode("Hello World"), [15496, 2159]);
 });
+test("encode() handles text of more than 150,000 tokens, and the ids decode back to the text", () => {
+    const tokenizer = new BPETokenizer();
+    const text = "Hello world. ".repeat(60000);
+    const ids = tokenizer.encode(text);
+    assert.ok(ids.length > 150000, `only ${ids.length} tokens`);
+    assert.equal(tokenizer.decode(ids), text);
+});

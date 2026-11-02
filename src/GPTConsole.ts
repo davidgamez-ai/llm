@@ -5,6 +5,11 @@ import Hyperparameters from "./Hyperparameters.js";
 import GPTModel from "./GPTModel.js";
 import Generator from "./Generator.js";
 import Trainer from "./Trainer.js";
+import { Dataset } from "./Dataset.js";
+import TextDataset from "./TextDataset.js";
+import TinyStoriesDataset from "./TinyStoriesDataset.js";
+import AlpacaDataset from "./AlpacaDataset.js";
+import TrainingPlanner, { DatasetName, TrainingKind, TrainingPlan } from "./TrainingPlanner.js";
 import BPETokenizer from "./BPETokenizer.js";
 import ModelManager, { ProgressCallback } from "./ModelManager.js";
 
@@ -22,10 +27,19 @@ export interface GPTConsoleOptions {
 
   /**
    * The training speed used to work out how much to train on in the time
-   * chosen. Defaults to GPTConsole.PARAMETER_TOKENS_PER_HOUR; tests pass a low
-   * value, so that training uses the fewest stories whatever the hours.
+   * chosen. Defaults to TrainingPlanner.PARAMETER_TOKENS_PER_HOUR; tests pass a
+   * low value, so that training uses the least data whatever the hours.
    */
   parameterTokensPerHour?: number;
+
+  /** Path to The Verdict. Defaults to data/the-verdict.txt. */
+  verdictFilePath?: string;
+
+  /** Path to Tiny Shakespeare. Defaults to data/tinyshakespeare.txt. */
+  shakespeareFilePath?: string;
+
+  /** Path to the Alpaca JSON file. Defaults to data/alpaca_data.json. */
+  alpacaFilePath?: string;
 
   /** Path to the TinyStories training CSV file. Defaults to data/TinyStories_train.csv. */
   trainingFilePath?: string;
@@ -46,27 +60,29 @@ export interface GPTConsoleOptions {
 /**
  * An interactive console for training the model and trying it out. run()
  * first asks for the size of model (small, medium, or large, which is GPT-2
- * small) and creates one with random weights. It then shows a menu with seven
+ * small) and creates one with random weights. It then shows a menu with eight
  * options:
  *
- * 1. Train: asks how many hours to train for, then trains the current model
- *    on as many TinyStories stories as fit in that time.
- * 2. Save model: asks for a file name and saves the model's weights and
+ * 1. Pretrain: asks which dataset to use and how many hours to train for, then
+ *    trains the current model, with settings worked out by TrainingPlanner.
+ * 2. Fine tune: the same, with the settings for adjusting weights that have
+ *    already been trained, such as GPT-2's.
+ * 3. Save model: asks for a file name and saves the model's weights and
  *    hyperparameters there (see ModelManager), asking before overwriting an
  *    existing file.
- * 3. Load model: asks for a file name and replaces the current model with
+ * 4. Load model: asks for a file name and replaces the current model with
  *    the one saved there, asking first if the current model has training
  *    that has not been saved.
- * 4. Load GPT-2 small weights: loads OpenAI's pretrained weights into the
+ * 5. Load GPT-2 small weights: loads OpenAI's pretrained weights into the
  *    current model if it is the right shape; otherwise replaces it with a
  *    large model and loads them into that, saying so. Asks first in the same
  *    way as Load model.
- * 5. Temperature: shows the temperature used when generating text and asks
+ * 6. Temperature: shows the temperature used when generating text and asks
  *    for a new one, between 0 and 1.
- * 6. Sampling method: shows how the next token is chosen when generating
+ * 7. Sampling method: shows how the next token is chosen when generating
  *    text and asks for a new method: "greedy", "top-p" followed by p, or
  *    "top-k" followed by k (e.g. "top-k 30").
- * 7. Chat: reads sentences typed by the user and shows how the model
+ * 8. Chat: reads sentences typed by the user and shows how the model
  *    continues each one, until the user types "quit", which returns to the
  *    menu.
  *
@@ -78,12 +94,13 @@ export interface GPTConsoleOptions {
  *
  * The model, trainer and generator are shared, so chat always uses the
  * latest trained weights, and training again continues from where the last
- * training finished: the trainer keeps its optimizer, and each run trains on
- * the stories that follow the ones the last run used. Before any training
- * the model's weights are random, so its replies are random tokens.
+ * training finished: the trainer keeps its optimizer, and TinyStories and
+ * Alpaca keep their places, so each run trains on the examples that follow the
+ * ones the last run used. Before any training the model's weights are random,
+ * so its replies are random tokens.
  *
- * A loaded model gets a new trainer, so training it again starts a new
- * optimizer and starts again from the first story.
+ * A loaded model gets a new trainer and datasets, so training it again starts a
+ * new optimizer and starts again from the first example.
  *
  * File names typed for saving and loading are relative to the folder the
  * program was started in, unless they are absolute; ".safetensors" is added
@@ -107,34 +124,26 @@ class GPTConsole {
     { size: "large", label: "Large (GPT-2 small)", create: Hyperparameters.largeModel },
   ];
 
-  /**
-   * Training speed: tokens trained on per hour multiplied by the number of
-   * parameters. Time per token grows in proportion to the number of
-   * parameters, so this is nearly the same for every model, and also gives
-   * estimates for loaded models of any shape. Measured on a desktop computer
-   * (Ryzen 7 3800X); a faster or slower computer will take proportionally less
-   * or more time:
-   *
-   *     Parameters      Tokens per hour   Multiplied
-   *     6.6 million             213,000   1.41 trillion
-   *     13.7 million            110,000   1.50 trillion
-   *     49.3 million             27,000   1.33 trillion
-   *     163 million               8,100   1.32 trillion
-   */
-  static readonly PARAMETER_TOKENS_PER_HOUR: number = 1.35e12;
+  /** The datasets offered for training, in the order they are listed. */
+  private static readonly DATASETS: { name: DatasetName; label: string }[] = [
+    { name: "verdict", label: "The Verdict" },
+    { name: "shakespeare", label: "Tiny Shakespeare" },
+    { name: "tinyStories", label: "TinyStories" },
+    { name: "alpaca", label: "Alpaca" },
+  ];
+
+  /** The words used for each kind of training in messages: at the start of a sentence, and within one. */
+  private static readonly TRAINING_WORDS: Record<TrainingKind, { title: string; noun: string }> = {
+    pretrain: { title: "Pre-training", noun: "pre-training" },
+    fineTune: { title: "Fine tuning", noun: "fine tuning" },
+  };
 
   /**
-   * How many times faster the validation loss is measured than the model is
-   * trained, per token, since validation only has a forward pass. Measured at
-   * 3 to 4 times.
+   * How far below the hours asked for a plan's estimate must be before the user
+   * is told that the data will run out early. Estimates are rough, so a small
+   * difference is not worth mentioning.
    */
-  private static readonly VALIDATION_SPEED_RATIO: number = 3;
-
-  /** The average number of tokens in a TinyStories story. Measured over 2,000 stories. */
-  private static readonly TOKENS_PER_STORY: number = 210;
-
-  /** The fewest stories the console trains on, however short the time. */
-  private static readonly MINIMUM_TRAINING_STORIES: number = 10;
+  private static readonly SHORT_RUN_RATIO: number = 0.9;
 
   /**
    * The number of tokens GPT-2 small generates in each chat reply: enough
@@ -182,6 +191,12 @@ class GPTConsole {
   /** Trains the model. */
   private trainer!: Trainer;
 
+  /** The stories to train the model on, which keeps track of how many have been used. */
+  private storiesDataset!: TinyStoriesDataset;
+
+  /** The Alpaca examples to train the model on, which keeps track of how many have been used. */
+  private alpacaDataset!: AlpacaDataset;
+
   /** Generates the model's continuation of each sentence typed in chat. */
   private generator!: Generator;
 
@@ -190,6 +205,15 @@ class GPTConsole {
 
   /** Path to the TinyStories validation CSV file. */
   private readonly validationFilePath: string;
+
+  /** Path to The Verdict. */
+  private readonly verdictFilePath: string;
+
+  /** Path to Tiny Shakespeare. */
+  private readonly shakespeareFilePath: string;
+
+  /** Path to the Alpaca JSON file. */
+  private readonly alpacaFilePath: string;
 
   /** Path to OpenAI's GPT-2 small weights. */
   private readonly gpt2FilePath: string;
@@ -220,52 +244,19 @@ class GPTConsole {
   constructor(options: GPTConsoleOptions = {}) {
     this.hyperparametersForSize = options.hyperparametersForSize ??
       ((size: ModelSize) => GPTConsole.MODEL_SIZES.find((option) => option.size === size)!.create());
-    this.parameterTokensPerHour = options.parameterTokensPerHour ?? GPTConsole.PARAMETER_TOKENS_PER_HOUR;
+    this.parameterTokensPerHour = options.parameterTokensPerHour ?? TrainingPlanner.PARAMETER_TOKENS_PER_HOUR;
 
     // The data folder is found from this compiled file's location (dist/), so the console works however it is launched.
     const dataFolder: string = path.join(import.meta.dirname, "..", "data");
     this.trainingFilePath = options.trainingFilePath ?? path.join(dataFolder, "TinyStories_train.csv");
     this.validationFilePath = options.validationFilePath ?? path.join(dataFolder, "TinyStories_validation.csv");
+    this.verdictFilePath = options.verdictFilePath ?? path.join(dataFolder, "the-verdict.txt");
+    this.shakespeareFilePath = options.shakespeareFilePath ?? path.join(dataFolder, "tinyshakespeare.txt");
+    this.alpacaFilePath = options.alpacaFilePath ?? path.join(dataFolder, "alpaca_data.json");
     this.gpt2FilePath = options.gpt2FilePath ?? ModelManager.GPT2_SMALL_FILE;
 
     this.input = options.input ?? process.stdin;
     this.output = options.output ?? process.stdout;
-  }
-
-  /**
-   * Works out how many TinyStories stories a model can train on in roughly a
-   * given number of hours. Training time is proportional to the number of
-   * tokens trained on, so:
-   *
-   *     tokens per hour = PARAMETER_TOKENS_PER_HOUR / number of parameters
-   *     training tokens = hours x tokens per hour - validation allowance
-   *     stories         = training tokens / tokens per story
-   *
-   * The validation allowance leaves time for measuring the validation loss at
-   * the end, which takes about 2 minutes for the small model, 12 for the medium
-   * model and 45 for the large one. The result is never fewer than
-   * MINIMUM_TRAINING_STORIES, or than the stories needed for two batches, so a
-   * short time can run for longer than asked.
-   *
-   * @param hours - The rough number of hours to train for, including validation.
-   * @param hyperparameters - The settings of the model: the source of numberValidationStories, batchSize and contextLength.
-   * @param parameterCount - The number of parameters in the model.
-   * @param parameterTokensPerHour - The training speed. Defaults to PARAMETER_TOKENS_PER_HOUR.
-   * @returns The number of training stories.
-   */
-  static storiesForHours(
-    hours: number,
-    hyperparameters: Hyperparameters,
-    parameterCount: number,
-    parameterTokensPerHour: number = GPTConsole.PARAMETER_TOKENS_PER_HOUR
-  ): number {
-    const tokensPerHour: number = parameterTokensPerHour / parameterCount;
-    const validationTokens: number = hyperparameters.numberValidationStories * GPTConsole.TOKENS_PER_STORY;
-    const trainingTokens: number = hours * tokensPerHour - validationTokens / GPTConsole.VALIDATION_SPEED_RATIO;
-
-    const storiesForTwoBatches: number = Math.ceil((2 * hyperparameters.batchSize * hyperparameters.contextLength) / GPTConsole.TOKENS_PER_STORY);
-    const minimum: number = Math.max(GPTConsole.MINIMUM_TRAINING_STORIES, storiesForTwoBatches);
-    return Math.max(minimum, Math.round(trainingTokens / GPTConsole.TOKENS_PER_STORY));
   }
 
   /**
@@ -280,20 +271,21 @@ class GPTConsole {
     this.lines = lineReader[Symbol.asyncIterator]();
 
     try {
-      this.write("GPT console: train a GPT model on TinyStories and chat with it.");
+      this.write("GPT console: pre-train or fine tune a GPT model and chat with it.");
       let running: boolean = await this.createFirstModel();
       while (running) {
         this.write("");
         const loaded: string = this.loadedFrom === null ? "" : ` since it was loaded from ${path.basename(this.loadedFrom)}`;
         this.write(`Menu (the model has been trained ${this.trainingRuns} time${this.trainingRuns === 1 ? "" : "s"}${loaded}):`);
-        this.write("  1. Train");
-        this.write("  2. Save model");
-        this.write("  3. Load model");
-        this.write("  4. Load GPT-2 small weights");
-        this.write("  5. Temperature");
-        this.write("  6. Sampling method");
-        this.write("  7. Chat");
-        const choice: string | null = await this.ask(`Choose 1 to 7 (or "${GPTConsole.QUIT}" to exit): `);
+        this.write("  1. Pretrain");
+        this.write("  2. Fine tune");
+        this.write("  3. Save model");
+        this.write("  4. Load model");
+        this.write("  5. Load GPT-2 small weights");
+        this.write("  6. Temperature");
+        this.write("  7. Sampling method");
+        this.write("  8. Chat");
+        const choice: string | null = await this.ask(`Choose 1 to 8 (or "${GPTConsole.QUIT}" to exit): `);
 
         // Each option, and confirmQuit(), returns false if the input ended while it was asking for something, which also ends the program.
         if (choice === null) {
@@ -301,18 +293,20 @@ class GPTConsole {
         } else if (choice.toLowerCase() === GPTConsole.QUIT) {
           running = !(await this.confirmQuit());
         } else if (choice === "1") {
-          running = await this.train();
+          running = await this.train("pretrain");
         } else if (choice === "2") {
-          running = await this.saveModel();
+          running = await this.train("fineTune");
         } else if (choice === "3") {
-          running = await this.loadModel();
+          running = await this.saveModel();
         } else if (choice === "4") {
-          running = await this.loadGPT2();
+          running = await this.loadModel();
         } else if (choice === "5") {
-          running = await this.setTemperature();
+          running = await this.loadGPT2();
         } else if (choice === "6") {
-          running = await this.setSamplingMethod();
+          running = await this.setTemperature();
         } else if (choice === "7") {
+          running = await this.setSamplingMethod();
+        } else if (choice === "8") {
           running = await this.chat();
         } else {
           this.write(`"${choice}" is not an option.`);
@@ -370,7 +364,7 @@ class GPTConsole {
 
     this.write(
       `The model has been trained ${this.trainingRuns} time${this.trainingRuns === 1 ? "" : "s"}, ` +
-      "and its training will be lost when the program ends. Choose 2 at the menu to save it."
+      "and its training will be lost when the program ends. Choose 3 at the menu to save it."
     );
     const answer: string | null = await this.ask("Quit anyway? (y/n): ");
     if (answer === null) {
@@ -380,38 +374,58 @@ class GPTConsole {
   }
 
   /**
-   * Menu option 1: asks how many hours to train for, sets the hyperparameters
-   * for that amount of training, and trains the current model on TinyStories,
-   * keeping its weights. TinyStories has far more text than can be trained on
-   * in a few hours, so every story is seen once: there is one epoch, and the
-   * number of stories sets the time (see storiesForHours). The trainer prints
-   * its progress as it goes. Training blocks the console until it finishes. If
-   * the data cannot be loaded (for example, if a file is missing), the error
-   * is shown and the console returns to the menu.
+   * Menu options 1 and 2: asks which dataset to use and how many hours to train
+   * for, sets the hyperparameters for that amount of training (see
+   * TrainingPlanner), and trains the current model, keeping its weights. The
+   * trainer prints its progress as it goes. Training blocks the console until it
+   * finishes. If the data cannot be loaded, the error is shown and the console
+   * returns to the menu.
    *
+   * @param kind - Whether to pre-train or fine tune.
    * @returns True to return to the menu; false if the input ended, which ends the program.
    */
-  private async train(): Promise<boolean> {
-    const hours: number | null | undefined = await this.askHours();
+  private async train(kind: TrainingKind): Promise<boolean> {
+    const { title, noun } = GPTConsole.TRAINING_WORDS[kind];
+    if (kind === "fineTune" && this.trainingRuns === 0 && this.loadedFrom === null) {
+      this.write("(The model has random weights, and fine tuning is meant for weights that have been trained: choose 4 or 5 at the menu to load some.)");
+    }
+
+    const dataset: DatasetName | null | undefined = await this.askDataset(noun);
+    if (dataset === undefined) {
+      return false;
+    }
+    if (dataset === null) {
+      this.write(`${title} cancelled.`);
+      return true;
+    }
+
+    const missing: string | undefined = this.dataFilePaths(dataset).find((filePath: string) => !fs.existsSync(filePath));
+    if (missing !== undefined) {
+      this.write(`The data for this dataset was not found at ${missing}.`);
+      return true;
+    }
+
+    const hours: number | null | undefined = await this.askHours(noun);
     if (hours === undefined) {
       return false;
     }
     if (hours === null) {
-      this.write("Training cancelled.");
+      this.write(`${title} cancelled.`);
       return true;
     }
 
-    this.hyperparameters.numberEpochs = 1;
-    this.hyperparameters.numberTrainingStories = GPTConsole.storiesForHours(
-      hours,
-      this.hyperparameters,
-      this.model.getParameterCount(),
-      this.parameterTokensPerHour
-    );
+    const plan: TrainingPlan = TrainingPlanner.plan(kind, dataset, hours, this.hyperparameters, this.model.getParameterCount(), this.parameterTokensPerHour);
+    this.hyperparameters.numberEpochs = plan.numberEpochs;
+    this.hyperparameters.batchSize = plan.batchSize;
+    this.hyperparameters.learningRate = plan.learningRate;
+    this.hyperparameters.trainingWindowLength = plan.trainingWindowLength;
+    if (plan.numberTrainingExamples !== undefined) {
+      this.hyperparameters.numberTrainingExamples = plan.numberTrainingExamples;
+    }
 
-    this.writePlan(hours);
+    this.writePlan(title, dataset, hours, plan);
     try {
-      this.trainer.loadTinyStories(this.trainingFilePath, this.validationFilePath);
+      this.trainer.load(this.createDataset(dataset, plan));
       const losses = this.trainer.train();
       this.trainingRuns++;
       this.unsavedTraining = true;
@@ -425,16 +439,90 @@ class GPTConsole {
   }
 
   /**
+   * Asks which dataset to train on, repeating the question until the answer is
+   * one of the options. An empty answer or "quit" cancels.
+   *
+   * @param noun - The kind of training, shown in the question, e.g. "fine tuning".
+   * @returns The dataset; null if the user cancelled; undefined if the input ended.
+   */
+  private async askDataset(noun: string): Promise<DatasetName | null | undefined> {
+    this.write(`Datasets for ${noun}:`);
+    GPTConsole.DATASETS.forEach(({ label }, index) => this.write(`  ${index + 1}. ${label}`));
+
+    for (;;) {
+      const answer: string | null = await this.ask(
+        `Choose 1 to ${GPTConsole.DATASETS.length} (press Enter or type "${GPTConsole.QUIT}" to cancel): `
+      );
+      if (answer === null) {
+        return undefined;
+      }
+      if (answer === "" || answer.toLowerCase() === GPTConsole.QUIT) {
+        return null;
+      }
+
+      const option = GPTConsole.DATASETS.find((_, index) => String(index + 1) === answer);
+      if (option !== undefined) {
+        return option.name;
+      }
+      this.write(`"${answer}" is not an option.`);
+    }
+  }
+
+  /**
+   * Lists the files a dataset needs.
+   *
+   * @param dataset - The dataset.
+   * @returns The paths of its files.
+   */
+  private dataFilePaths(dataset: DatasetName): string[] {
+    switch (dataset) {
+      case "verdict":
+        return [this.verdictFilePath];
+      case "shakespeare":
+        return [this.shakespeareFilePath];
+      case "tinyStories":
+        return [this.trainingFilePath, this.validationFilePath];
+      case "alpaca":
+        return [this.alpacaFilePath];
+    }
+  }
+
+  /**
+   * Gets the dataset object for a training run. TinyStories and Alpaca use the
+   * objects kept for the current model, which remember how far training has
+   * got. A text file has no position to remember, and a new object is needed for
+   * each amount of text.
+   *
+   * @param dataset - The dataset.
+   * @param plan - The plan for the run, the source of maximumCharacters.
+   * @returns The dataset object.
+   */
+  private createDataset(dataset: DatasetName, plan: TrainingPlan): Dataset {
+    const options = plan.maximumCharacters === undefined ? {} : { maximumCharacters: plan.maximumCharacters };
+    switch (dataset) {
+      case "verdict":
+        return new TextDataset(this.verdictFilePath, options);
+      case "shakespeare":
+        return new TextDataset(this.shakespeareFilePath, options);
+      case "tinyStories":
+        return this.storiesDataset;
+      case "alpaca":
+        return this.alpacaDataset;
+    }
+  }
+
+  /**
    * Asks how many hours to train for, repeating the question until the
    * answer is sensible: a number greater than 0 and no more than
    * MAXIMUM_HOURS. An empty answer or "quit" cancels.
    *
+   * @param noun - The kind of training, shown in the question, e.g. "fine tuning".
    * @returns The hours; null if the user cancelled; undefined if the input ended.
    */
-  private async askHours(): Promise<number | null | undefined> {
+  private async askHours(noun: string): Promise<number | null | undefined> {
     for (;;) {
       const answer: string | null = await this.ask(
-        `How many hours of training? (e.g. 2.5; press Enter or type "${GPTConsole.QUIT}" to cancel): `
+        `How many hours of ${noun}? (e.g. 2.5; press Enter or type "${GPTConsole.QUIT}" to cancel): `
       );
       if (answer === null) {
         return undefined;
@@ -462,30 +550,56 @@ class GPTConsole {
   }
 
   /**
-   * Describes the training about to start: how many stories, how big the
-   * model is, and roughly when training will finish.
+   * Describes the training about to start: how much data, the settings chosen,
+   * how big the model is, and roughly when training will finish.
    *
+   * @param title - The kind of training, e.g. "Fine tuning".
+   * @param dataset - The dataset being trained on.
    * @param hours - The hours of training chosen.
+   * @param plan - The settings worked out for the run.
    */
-  private writePlan(hours: number): void {
-    const finish: Date = new Date(Date.now() + hours * 60 * 60 * 1000);
+  private writePlan(title: string, dataset: DatasetName, hours: number, plan: TrainingPlan): void {
+    const label: string = GPTConsole.DATASETS.find((option) => option.name === dataset)!.label;
+    const finishesEarly: boolean = plan.estimatedHours < hours * GPTConsole.SHORT_RUN_RATIO;
+    const expectedHours: number = finishesEarly ? plan.estimatedHours : hours;
+    const finish: Date = new Date(Date.now() + expectedHours * 60 * 60 * 1000);
     const finishTime: string = finish.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const stories: number = this.hyperparameters.numberTrainingStories;
-    const epochs: number = this.hyperparameters.numberEpochs;
-    // Each run continues from where the trainer's last run finished in the training file.
-    const firstStory: number = this.trainer.tinyStoriesLoaded + 1;
+    const epochs: number = plan.numberEpochs;
 
     this.write(
-      `Training for about ${hours} hour${hours === 1 ? "" : "s"}: ${stories} stories ` +
-      `(numbers ${firstStory} to ${firstStory + stories - 1}), ${epochs} epoch${epochs === 1 ? "" : "s"}, ` +
-      `a model ${this.hyperparameters.embeddingSize} values wide with ` +
+      `${title} on ${label} for about ${hours} hour${hours === 1 ? "" : "s"}: ${this.describeAmount(dataset, plan)}, ` +
+      `${epochs} epoch${epochs === 1 ? "" : "s"}, batch size ${plan.batchSize}, learning rate ${plan.learningRate}, ` +
+      `windows of up to ${plan.trainingWindowLength} tokens, a model ${this.hyperparameters.embeddingSize} values wide with ` +
       `${(this.model.getParameterCount() / 1e6).toFixed(1)} million parameters.`
     );
+    if (finishesEarly) {
+      this.write(`There is only enough data for this model to train for about ${plan.estimatedHours.toFixed(1)} hours, so it will finish early.`);
+    }
     this.write(`Expected to finish at about ${finishTime}. The console is unavailable until then.`);
   }
 
   /**
-   * Menu option 2: asks for a file name, checks it, and saves the model's
+   * Describes how much of a dataset a run will use.
+   *
+   * @param dataset - The dataset being trained on.
+   * @param plan - The settings worked out for the run.
+   * @returns e.g. "10 stories (numbers 1 to 10)" or "the first 5000 characters".
+   */
+  private describeAmount(dataset: DatasetName, plan: TrainingPlan): string {
+    const examples: number = plan.numberTrainingExamples ?? 0;
+    if (dataset === "tinyStories") {
+      // Each run continues from where the last run finished in the training file.
+      const firstStory: number = this.storiesDataset.storiesLoaded + 1;
+      return `${examples} stories (numbers ${firstStory} to ${firstStory + examples - 1})`;
+    }
+    if (dataset === "alpaca") {
+      return `${examples} examples`;
+    }
+    return plan.maximumCharacters === undefined ? "the whole text" : `the first ${plan.maximumCharacters} characters`;
+  }
+
+  /**
+   * Menu option 3: asks for a file name, checks it, and saves the model's
    * weights and hyperparameters there, showing the progress. If a file
    * already exists there the user is asked whether to overwrite it; if not,
    * or if the file name cannot be used, the user is asked for another. If
@@ -539,7 +653,7 @@ class GPTConsole {
   }
 
   /**
-   * Menu option 3: asks for a file name, checks that there is a file there,
+   * Menu option 4: asks for a file name, checks that there is a file there,
    * and replaces the current model with the one saved in it (see
    * replaceModel). If the file name cannot be used, the user is asked for
    * another.
@@ -561,7 +675,7 @@ class GPTConsole {
   }
 
   /**
-   * Menu option 4: loads OpenAI's pretrained weights from gpt2FilePath and
+   * Menu option 5: loads OpenAI's pretrained weights from gpt2FilePath and
    * sets the model's replies to GPT2_OUTPUT_LENGTH tokens. If the current
    * model has GPT-2 small's shape (a large model), the weights are loaded into
    * it, which saves building another model. Any other model, such as a small
@@ -777,7 +891,7 @@ class GPTConsole {
   }
 
   /**
-   * Menu option 5: shows the current temperature and asks for a new one,
+   * Menu option 6: shows the current temperature and asks for a new one,
    * repeating the question until the answer is a number between 0 and 1. An
    * empty answer or "quit" leaves the temperature unchanged.
    *
@@ -787,7 +901,7 @@ class GPTConsole {
     this.write(`The temperature is currently ${this.hyperparameters.temperature}.`);
     // Greedy sampling always takes the most likely token, so the temperature only matters for top-k and top-p.
     if (this.hyperparameters.samplingMethod === Hyperparameters.GREEDY_SAMPLING) {
-      this.write("(Greedy sampling ignores the temperature; choose 6 at the menu to use top-k or top-p.)");
+      this.write("(Greedy sampling ignores the temperature; choose 7 at the menu to use top-k or top-p.)");
     }
 
     for (;;) {
@@ -814,7 +928,7 @@ class GPTConsole {
   }
 
   /**
-   * Menu option 6: shows the current sampling method and asks for a new one,
+   * Menu option 7: shows the current sampling method and asks for a new one,
    * typed as the method's name followed by its setting, if it has one:
    * "greedy", "top-p 0.9" or "top-k 30". If the setting is left out, the
    * current value is kept. The question is repeated until the answer can be
@@ -912,7 +1026,7 @@ class GPTConsole {
   }
 
   /**
-   * Menu option 7: reads sentences from the user and shows the model's
+   * Menu option 8: reads sentences from the user and shows the model's
    * continuation of each, until the user types "quit". Empty lines are
    * ignored.
    *
@@ -969,8 +1083,8 @@ class GPTConsole {
   }
 
   /**
-   * Makes a model the current one, with a new trainer and generator built
-   * from its hyperparameters, and resets the record of its training. Used
+   * Makes a model the current one, with a new trainer, datasets and generator,
+   * and resets the record of its training. Used
    * for both newly built and loaded models; the caller sets loadedFrom for a
    * loaded one. The temperature and sampling method chosen in the console
    * are carried over from the previous model, so replacing the model does
@@ -986,6 +1100,8 @@ class GPTConsole {
     this.model = model;
     this.hyperparameters = model.hyperparameters;
     this.trainer = new Trainer(this.hyperparameters, this.model);
+    this.storiesDataset = new TinyStoriesDataset(this.trainingFilePath, this.validationFilePath);
+    this.alpacaDataset = new AlpacaDataset(this.alpacaFilePath);
     this.generator = new Generator(this.hyperparameters, this.model);
     this.trainingRuns = 0;
     this.unsavedTraining = false;

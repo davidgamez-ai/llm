@@ -61,13 +61,14 @@ class Hyperparameters {
     _beta2;
     _optimizerEpsilon;
     _weightDecay;
-    _numberTrainingStories;
-    _numberValidationStories;
+    _numberTrainingExamples;
+    _numberValidationExamples;
     _temperature;
     _samplingMethod;
     _topK;
     _topP;
     _seed;
+    _trainingWindowLength;
     /**
      * The random number stream shared by every component built from this
      * instance: seeded from _seed when it is set, otherwise Math.random.
@@ -91,8 +92,9 @@ class Hyperparameters {
      * @param contextLength - The number of tokens of context the model
      * operates over at once. Defaults to 1024, as in GPT-2. The position
      * embedding matrix has contextLength rows, so this also changes the
-     * parameter count. Training runs are much faster with a smaller value.
-     * Must be a positive whole number.
+     * parameter count. Training runs are much faster with shorter windows; to
+     * shorten them without changing the model's shape, as a loaded model needs,
+     * use trainingWindowLength. Must be a positive whole number.
      * @param dropoutRate - The probability, between 0 and 1 inclusive, that
      * any given value is dropped (set to zero) during dropout.
      * @param mode - What the model is being used for: TRAINING_MODE,
@@ -134,10 +136,11 @@ class Hyperparameters {
      * number greater than or equal to 0.
      * @param outputLength - The number of tokens the model should generate.
      * Defaults to 2. Must be a positive whole number.
-     * @param trainingRatio - The proportion of the loaded text used for
-     * training; the rest is held back for validation. Defaults to 0.9, as in
-     * the book. Must be greater than 0 and less than 1, so that neither set
-     * is empty.
+     * @param trainingRatio - The proportion of each file that TextDataset uses
+     * for training; the rest is held back for validation. Datasets of separate
+     * examples use numberValidationExamples instead. Defaults to 0.9, as in the
+     * book. Must be greater than 0 and less than 1, so that neither set is
+     * empty.
      * @param numberEpochs - The number of times training passes over the whole
      * training set. Defaults to 1, so a test run finishes quickly; the book
      * uses 10. Must be a positive whole number.
@@ -157,16 +160,15 @@ class Hyperparameters {
      * each step, which discourages large weights and so reduces overfitting.
      * Defaults to 0.1, the book's value (dnn uses 0.01). Must be a finite
      * number greater than or equal to 0.
-     * @param numberTrainingStories - The number of stories from the
-     * TinyStories training data to train on. Defaults to 1000: TinyStories
-     * averages about 210 tokens per story, and the first 1000 come to 235,419
-     * tokens, roughly 2 hours per epoch with smallModel(). Must be a positive
-     * whole number.
-     * @param numberValidationStories - The number of stories from the
-     * TinyStories validation data to measure the validation loss on. Defaults
-     * to 100 (17,266 tokens): enough for a steady measurement, while taking
-     * only a few minutes at the end of each epoch. Must be a positive whole
-     * number.
+     * @param numberTrainingExamples - The number of examples, such as
+     * TinyStories stories, to train on each time a dataset made up of separate
+     * examples is loaded. Defaults to 1000: TinyStories averages about 210
+     * tokens per story, and the first 1000 come to 235,419 tokens, roughly 2
+     * hours per epoch with smallModel(). Must be a positive whole number.
+     * @param numberValidationExamples - The number of examples from such a
+     * dataset to measure the validation loss on. Defaults to 100 (17,266 tokens
+     * of TinyStories): enough for a steady measurement, while taking only a few
+     * minutes at the end of each epoch. Must be a positive whole number.
      * @param temperature - How random text generation is: the logits are
      * divided by the temperature before the softmax, so values near 0 make the
      * most likely token ever more certain to be chosen, while 1 leaves the
@@ -190,6 +192,9 @@ class Hyperparameters {
      * same results, provided components are created and called in the same
      * order. When omitted, Math.random() is used and results differ on every
      * run.
+     * @param trainingWindowLength - Optional longest window to train on. When
+     * omitted, windows are as long as contextLength. See the trainingWindowLength
+     * getter. Must be a positive whole number.
      * @throws RangeError if contextLength is not a positive whole number.
      * @throws RangeError if dropoutRate is less than 0, greater than 1 or NaN.
      * @throws RangeError if mode is not TRAINING_MODE, VALIDATION_MODE or GENERATION_MODE.
@@ -207,15 +212,16 @@ class Hyperparameters {
      * @throws RangeError if learningRate or optimizerEpsilon is not a finite number greater than 0.
      * @throws RangeError if beta1 or beta2 is not at least 0 and less than 1.
      * @throws RangeError if weightDecay is negative, infinite or NaN.
-     * @throws RangeError if numberTrainingStories or numberValidationStories is not a positive whole number.
+     * @throws RangeError if numberTrainingExamples or numberValidationExamples is not a positive whole number.
      * @throws RangeError if temperature is less than 0, greater than 1 or NaN.
      * @throws RangeError if samplingMethod is not GREEDY_SAMPLING, TOP_K_SAMPLING or TOP_P_SAMPLING.
      * @throws RangeError if topK is not a positive whole number.
      * @throws RangeError if topP is not greater than 0 and at most 1.
+     * @throws RangeError if trainingWindowLength is set and is not a positive whole number.
      */
     constructor(embeddingSize = 768, //GPT-2 uses 768
     contextLength = 1024, //GPT-2 uses 1024
-    dropoutRate = 0.1, mode = Hyperparameters.TRAINING_MODE, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = true, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, linearLayerStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, trainingRatio = 0.9, numberEpochs = 1, learningRate = 0.0004, beta1 = 0.9, beta2 = 0.999, optimizerEpsilon = 1e-8, weightDecay = 0.1, numberTrainingStories = 1000, numberValidationStories = 100, temperature = 1, samplingMethod = Hyperparameters.GREEDY_SAMPLING, topK = 40, topP = 0.9, seed) {
+    dropoutRate = 0.1, mode = Hyperparameters.TRAINING_MODE, numberAttentionHeads = 12, numberTransformerBlocks = 12, batchSize = 2, qkvBias = true, feedForwardBias = true, positionEmbeddingStandardDeviation = 0.01, tokenEmbeddingStandardDeviation = 0.02, linearLayerStandardDeviation = 0.02, outputLayerStandardDeviation = 0.02, outputLength = 2, trainingRatio = 0.9, numberEpochs = 1, learningRate = 0.0004, beta1 = 0.9, beta2 = 0.999, optimizerEpsilon = 1e-8, weightDecay = 0.1, numberTrainingExamples = 1000, numberValidationExamples = 100, temperature = 1, samplingMethod = Hyperparameters.GREEDY_SAMPLING, topK = 40, topP = 0.9, seed, trainingWindowLength) {
         Hyperparameters.validatePositiveInteger("contextLength", contextLength);
         Hyperparameters.validateDropoutRate(dropoutRate);
         Hyperparameters.validateMode(mode);
@@ -235,12 +241,15 @@ class Hyperparameters {
         Hyperparameters.validateBeta("beta2", beta2);
         Hyperparameters.validatePositiveNumber("optimizerEpsilon", optimizerEpsilon);
         Hyperparameters.validateWeightDecay(weightDecay);
-        Hyperparameters.validatePositiveInteger("numberTrainingStories", numberTrainingStories);
-        Hyperparameters.validatePositiveInteger("numberValidationStories", numberValidationStories);
+        Hyperparameters.validatePositiveInteger("numberTrainingExamples", numberTrainingExamples);
+        Hyperparameters.validatePositiveInteger("numberValidationExamples", numberValidationExamples);
         Hyperparameters.validateTemperature(temperature);
         Hyperparameters.validateSamplingMethod(samplingMethod);
         Hyperparameters.validatePositiveInteger("topK", topK);
         Hyperparameters.validateTopP(topP);
+        if (trainingWindowLength !== undefined) {
+            Hyperparameters.validatePositiveInteger("trainingWindowLength", trainingWindowLength);
+        }
         this._embeddingSize = embeddingSize;
         this._contextLength = contextLength;
         this._vocabularySize = new BPETokenizer().vocabularySize;
@@ -264,13 +273,14 @@ class Hyperparameters {
         this._beta2 = beta2;
         this._optimizerEpsilon = optimizerEpsilon;
         this._weightDecay = weightDecay;
-        this._numberTrainingStories = numberTrainingStories;
-        this._numberValidationStories = numberValidationStories;
+        this._numberTrainingExamples = numberTrainingExamples;
+        this._numberValidationExamples = numberValidationExamples;
         this._temperature = temperature;
         this._samplingMethod = samplingMethod;
         this._topK = topK;
         this._topP = topP;
         this._seed = seed;
+        this._trainingWindowLength = trainingWindowLength;
         this._random = Hyperparameters.createRandom(seed);
     }
     /**
@@ -396,7 +406,7 @@ class Hyperparameters {
      * JSON.stringify, which would otherwise write the private fields, with
      * their underscores, and drop the random number stream.
      *
-     * @returns Every settable value. seed is left out when it is not set.
+     * @returns Every settable value. seed and trainingWindowLength are left out when they are not set.
      */
     toJSON() {
         return {
@@ -421,14 +431,16 @@ class Hyperparameters {
             beta2: this._beta2,
             optimizerEpsilon: this._optimizerEpsilon,
             weightDecay: this._weightDecay,
-            numberTrainingStories: this._numberTrainingStories,
-            numberValidationStories: this._numberValidationStories,
+            numberTrainingExamples: this._numberTrainingExamples,
+            numberValidationExamples: this._numberValidationExamples,
             temperature: this._temperature,
             samplingMethod: this._samplingMethod,
             topK: this._topK,
             topP: this._topP,
-            // JSON.stringify drops undefined values, so an unset seed is simply left out.
+            // JSON.stringify drops undefined values, so an unset seed or window length is simply left out.
             seed: this._seed,
+            // The value as set, rather than the getter's result, so that a window length that is unset stays unset.
+            trainingWindowLength: this._trainingWindowLength,
         };
     }
     /**
@@ -458,7 +470,7 @@ class Hyperparameters {
                 throw new TypeError(`Hyperparameters| ${name} must be true or false; got ${values[name]}`);
             }
         }
-        return new Hyperparameters(values.embeddingSize, values.contextLength, values.dropoutRate, values.mode, values.numberAttentionHeads, values.numberTransformerBlocks, values.batchSize, values.qkvBias, values.feedForwardBias, values.positionEmbeddingStandardDeviation, values.tokenEmbeddingStandardDeviation, values.linearLayerStandardDeviation, values.outputLayerStandardDeviation, values.outputLength, values.trainingRatio, values.numberEpochs, values.learningRate, values.beta1, values.beta2, values.optimizerEpsilon, values.weightDecay, values.numberTrainingStories, values.numberValidationStories, values.temperature, values.samplingMethod, values.topK, values.topP, values.seed);
+        return new Hyperparameters(values.embeddingSize, values.contextLength, values.dropoutRate, values.mode, values.numberAttentionHeads, values.numberTransformerBlocks, values.batchSize, values.qkvBias, values.feedForwardBias, values.positionEmbeddingStandardDeviation, values.tokenEmbeddingStandardDeviation, values.linearLayerStandardDeviation, values.outputLayerStandardDeviation, values.outputLength, values.trainingRatio, values.numberEpochs, values.learningRate, values.beta1, values.beta2, values.optimizerEpsilon, values.weightDecay, values.numberTrainingExamples, values.numberValidationExamples, values.temperature, values.samplingMethod, values.topK, values.topP, values.seed, values.trainingWindowLength);
     }
     /**
      * Creates the random number stream for a seed.
@@ -670,6 +682,34 @@ class Hyperparameters {
         this._contextLength = contextLength;
     }
     /**
+     * The longest window to train on: the value set, but never more than
+     * contextLength, since the position embedding has no rows beyond that. When
+     * no value is set, this is contextLength.
+     *
+     * Training on shorter windows is much faster, and this does not change the
+     * shape of the model. Lowering contextLength on a loaded model would instead
+     * save a value that no longer matches its position embedding, and the file
+     * could then not be loaded again. A short window length also lets a short
+     * text, such as The Verdict, train on a model with a long context.
+     */
+    get trainingWindowLength() {
+        return this._trainingWindowLength === undefined
+            ? this._contextLength
+            : Math.min(this._trainingWindowLength, this._contextLength);
+    }
+    /**
+     * Sets the longest window to train on. Set it to undefined to use
+     * contextLength again.
+     *
+     * @throws RangeError if trainingWindowLength is set and is not a positive whole number.
+     */
+    set trainingWindowLength(trainingWindowLength) {
+        if (trainingWindowLength !== undefined) {
+            Hyperparameters.validatePositiveInteger("trainingWindowLength", trainingWindowLength);
+        }
+        this._trainingWindowLength = trainingWindowLength;
+    }
+    /**
      * The number of columns in each of the query/key/value weight matrices,
      * i.e. the size of the projected vectors those matrices produce. Equal to
      * embeddingSize / numberAttentionHeads, so the concatenated output of all
@@ -821,8 +861,8 @@ class Hyperparameters {
         this._outputLength = outputLength;
     }
     /**
-     * The proportion of the loaded text used for training; the rest is held
-     * back for validation.
+     * The proportion of each file that TextDataset uses for training; the rest
+     * is held back for validation.
      */
     get trainingRatio() {
         return this._trainingRatio;
@@ -887,26 +927,27 @@ class Hyperparameters {
         this._weightDecay = weightDecay;
     }
     /**
-     * The number of stories from the TinyStories training data to train on.
-     * TinyStories averages about 210 tokens per story, so training time grows
-     * by roughly 1 hour per 500 stories with smallModel().
+     * The number of examples, such as TinyStories stories, to train on each time
+     * a dataset made up of separate examples is loaded. TinyStories averages
+     * about 210 tokens per story, so training time grows by roughly 1 hour per
+     * 500 stories with smallModel().
      */
-    get numberTrainingStories() {
-        return this._numberTrainingStories;
+    get numberTrainingExamples() {
+        return this._numberTrainingExamples;
     }
-    /** @throws RangeError if numberTrainingStories is not a positive whole number. */
-    set numberTrainingStories(numberTrainingStories) {
-        Hyperparameters.validatePositiveInteger("numberTrainingStories", numberTrainingStories);
-        this._numberTrainingStories = numberTrainingStories;
+    /** @throws RangeError if numberTrainingExamples is not a positive whole number. */
+    set numberTrainingExamples(numberTrainingExamples) {
+        Hyperparameters.validatePositiveInteger("numberTrainingExamples", numberTrainingExamples);
+        this._numberTrainingExamples = numberTrainingExamples;
     }
-    /** The number of stories from the TinyStories validation data to measure the validation loss on. */
-    get numberValidationStories() {
-        return this._numberValidationStories;
+    /** The number of examples, such as TinyStories stories, to measure the validation loss on. */
+    get numberValidationExamples() {
+        return this._numberValidationExamples;
     }
-    /** @throws RangeError if numberValidationStories is not a positive whole number. */
-    set numberValidationStories(numberValidationStories) {
-        Hyperparameters.validatePositiveInteger("numberValidationStories", numberValidationStories);
-        this._numberValidationStories = numberValidationStories;
+    /** @throws RangeError if numberValidationExamples is not a positive whole number. */
+    set numberValidationExamples(numberValidationExamples) {
+        Hyperparameters.validatePositiveInteger("numberValidationExamples", numberValidationExamples);
+        this._numberValidationExamples = numberValidationExamples;
     }
     /**
      * How random text generation is, between 0 and 1 inclusive. The logits are
