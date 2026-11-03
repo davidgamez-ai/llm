@@ -13,9 +13,9 @@ import BPETokenizer from "./BPETokenizer.js";
 import ModelManager from "./ModelManager.js";
 /**
  * An interactive console for training the model and trying it out. run()
- * first asks for the size of model (small, medium, or large, which is GPT-2
- * small) and creates one with random weights. It then shows a menu with eight
- * options:
+ * first asks which model to start with: a size (small, medium, or large, which
+ * is GPT-2 small), which creates one with random weights, or a saved model to
+ * load. It then shows a menu with eight options:
  *
  * 1. Pretrain: asks which dataset to use and how many hours to train for, then
  *    trains the current model, with settings worked out by TrainingPlanner.
@@ -36,9 +36,12 @@ import ModelManager from "./ModelManager.js";
  * 7. Sampling method: shows how the next token is chosen when generating
  *    text and asks for a new method: "greedy", "top-p" followed by p, or
  *    "top-k" followed by k (e.g. "top-k 30").
- * 8. Chat: reads sentences typed by the user and shows how the model
- *    continues each one, until the user types "quit", which returns to the
- *    menu.
+ * 8. Chat: asks for a chat mode, then reads lines typed by the user and shows
+ *    the model's reply to each, until the user types "quit", which returns to
+ *    the menu. Standard continues a sentence for a fixed number of tokens, Early
+ *    stop continues it until the model produces its end token, and Alpaca treats
+ *    the line as an instruction in the template used to train on Alpaca, and also
+ *    stops at the end token.
  *
  * The temperature and sampling method are kept when the model is replaced by
  * loading one.
@@ -82,6 +85,12 @@ class GPTConsole {
         { name: "tinyStories", label: "TinyStories" },
         { name: "alpaca", label: "Alpaca" },
     ];
+    /** The chat modes, in the order they are listed. */
+    static CHAT_MODES = [
+        { mode: "standard", label: "Standard" },
+        { mode: "earlyStop", label: "Early stop" },
+        { mode: "alpaca", label: "Alpaca" },
+    ];
     /** The words used for each kind of training in messages: at the start of a sentence, and within one. */
     static TRAINING_WORDS = {
         pretrain: { title: "Pre-training", noun: "pre-training" },
@@ -102,6 +111,15 @@ class GPTConsole {
      * 13 seconds for 10 tokens and 70 for 30), so 25 tokens take about a minute.
      */
     static GPT2_OUTPUT_LENGTH = 15;
+    /**
+     * The most tokens in a reply in the chat modes that stop at the end token,
+     * for models whose outputLength is lower. GPT2_OUTPUT_LENGTH alone would cut
+     * off most Alpaca answers. This limit holds 75% of the answers a small model
+     * trains on (windows of 128 tokens) and 56% of those a large model trains on
+     * (windows of 256). A higher limit would hold more, but a reply that never
+     * reaches the end token already takes about 8 minutes on GPT-2 small.
+     */
+    static STOPPING_REPLY_LENGTH = 50;
     /** The extension added to file names typed without one when saving or loading. */
     static MODEL_EXTENSION = ".safetensors";
     /** Characters Windows does not allow in file names (and control characters, which no system allows sensibly). */
@@ -118,8 +136,9 @@ class GPTConsole {
     parameterTokensPerHour;
     /*
      * The current model and the objects built with it. They are set by
-     * buildModel(), which run() calls before showing the menu; the "!" tells
-     * TypeScript that they are set, since it cannot see into buildModel().
+     * useModel(), when createFirstModel() creates or loads a model before the menu
+     * is shown; the "!" tells TypeScript that they are set, since it cannot see
+     * into those methods.
      */
     /** The settings the current model was built with, shared by the trainer and the generator. */
     hyperparameters;
@@ -131,8 +150,10 @@ class GPTConsole {
     storiesDataset;
     /** The Alpaca examples to train the model on, which keeps track of how many have been used. */
     alpacaDataset;
-    /** Generates the model's continuation of each sentence typed in chat. */
+    /** Generates the model's reply to each line typed in chat. */
     generator;
+    /** Measures the length of Alpaca prompts, to warn about those too long for the model's context. */
+    tokenizer = new BPETokenizer();
     /** Path to the TinyStories training CSV file. */
     trainingFilePath;
     /** Path to the TinyStories validation CSV file. */
@@ -159,8 +180,8 @@ class GPTConsole {
      */
     lines = null;
     /**
-     * Creates a GPTConsole. No model is built until run() has asked for its
-     * size.
+     * Creates a GPTConsole. No model is built until run() has asked which one
+     * to start with.
      *
      * @param options - Optional settings; see GPTConsoleOptions.
      */
@@ -180,9 +201,9 @@ class GPTConsole {
         this.output = options.output ?? process.stdout;
     }
     /**
-     * Starts the interactive console: asks for the size of model and creates
-     * it, then shows the menu, carries out each choice, and shows the menu
-     * again, until the user types "quit" at the menu or the input ends.
+     * Starts the interactive console: asks which model to start with and creates
+     * or loads it, then shows the menu, carries out each choice, and shows the
+     * menu again, until the user types "quit" at the menu or the input ends.
      *
      * @returns A promise that resolves when the console has ended.
      */
@@ -247,20 +268,33 @@ class GPTConsole {
         }
     }
     /**
-     * Asks which size of model to use, repeating the question until the answer
-     * is one of the options, and creates a model of that size with random
-     * weights. Typing "quit" ends the program.
+     * Asks which model to start with, repeating the question until the answer is
+     * one of the options: a size, which creates a model of that size with random
+     * weights, or loading a saved model, which builds no other model first. If a
+     * load is cancelled or fails there is still no model, so the question is asked
+     * again. Typing "quit" ends the program.
      *
-     * @returns True if a model was created; false if the user quit or the input ended.
+     * @returns True if there is now a model; false if the user quit or the input ended.
      */
     async createFirstModel() {
+        const loadOption = String(GPTConsole.MODEL_SIZES.length + 1);
         this.write("");
-        this.write("Model size:");
+        this.write("Model:");
         GPTConsole.MODEL_SIZES.forEach(({ label }, index) => this.write(`  ${index + 1}. ${label}`));
+        this.write(`  ${loadOption}. Load model`);
         for (;;) {
-            const answer = await this.ask(`Choose 1 to ${GPTConsole.MODEL_SIZES.length} (or "${GPTConsole.QUIT}" to exit): `);
+            const answer = await this.ask(`Choose 1 to ${loadOption} (or "${GPTConsole.QUIT}" to exit): `);
             if (answer === null || answer.toLowerCase() === GPTConsole.QUIT) {
                 return false;
+            }
+            if (answer === loadOption) {
+                if (!(await this.loadModel())) {
+                    return false;
+                }
+                if (this.model !== undefined) {
+                    return true;
+                }
+                continue;
             }
             const option = GPTConsole.MODEL_SIZES.find((_, index) => String(index + 1) === answer);
             if (option !== undefined) {
@@ -548,10 +582,10 @@ class GPTConsole {
         return true;
     }
     /**
-     * Menu option 4: asks for a file name, checks that there is a file there,
-     * and replaces the current model with the one saved in it (see
-     * replaceModel). If the file name cannot be used, the user is asked for
-     * another.
+     * Menu option 4, and the last option at startup: asks for a file name, checks
+     * that there is a file there, and replaces the current model, if there is one,
+     * with the one saved in it (see replaceModel). If the file name cannot be used,
+     * the user is asked for another.
      *
      * @returns True to return to the menu; false if the input ended, which ends the program.
      */
@@ -600,7 +634,8 @@ class GPTConsole {
             }
             model.hyperparameters.outputLength = GPTConsole.GPT2_OUTPUT_LENGTH;
             return model;
-        }, `${changeNote}\nChat replies will be ${GPTConsole.GPT2_OUTPUT_LENGTH} tokens long and take about a minute each, as GPT-2 small is large for plain TypeScript.`);
+        }, `${changeNote}\nStandard chat replies will be ${GPTConsole.GPT2_OUTPUT_LENGTH} tokens long and take about a minute each, as GPT-2 small is large for plain TypeScript. ` +
+            `Early stop and Alpaca replies can run to ${GPTConsole.STOPPING_REPLY_LENGTH} tokens, taking about 4 and 8 minutes if the model does not end them sooner.`);
     }
     /**
      * Replaces the current model with one loaded from a file, showing the
@@ -608,7 +643,8 @@ class GPTConsole {
      * current model has training that has not been saved, the user is asked
      * first, since loading would lose it. If loading fails (for example, the
      * file is not a saved model), the error is shown, the current model is
-     * kept, and the console returns to the menu.
+     * kept, and the console returns to the menu. At startup there is no current
+     * model to keep, so the caller asks again.
      *
      * @param filePath - The file being loaded, shown to the user and in the menu afterwards.
      * @param description - What is being loaded, e.g. "the model", shown in the progress message.
@@ -645,7 +681,10 @@ class GPTConsole {
         }
         catch (error) {
             this.write(`Loading failed: ${error instanceof Error ? error.message : String(error)}`);
-            this.write("The current model is unchanged.");
+            // At startup there is no current model yet.
+            if (this.model !== undefined) {
+                this.write("The current model is unchanged.");
+            }
         }
         return true;
     }
@@ -880,46 +919,132 @@ class GPTConsole {
         }
     }
     /**
-     * Menu option 8: reads sentences from the user and shows the model's
-     * continuation of each, until the user types "quit". Empty lines are
-     * ignored.
+     * Menu option 8: asks which chat mode to use, then reads lines from the user
+     * and shows the model's reply to each (see reply()), until the user types
+     * "quit". Empty lines are ignored.
      *
      * @returns True to return to the menu; false if the input ended, which ends the program.
      */
     async chat() {
-        this.write(`Chat: type the start of a sentence and the model will continue it. Type "${GPTConsole.QUIT}" to return to the menu.`);
+        const mode = await this.askChatMode();
+        if (mode === undefined) {
+            return false;
+        }
+        if (mode === null) {
+            return true;
+        }
+        this.write(`${this.describeChatMode(mode)} Type "${GPTConsole.QUIT}" to return to the menu.`);
         if (this.trainingRuns === 0 && this.loadedFrom === null) {
             this.write("(The model has not been trained yet, so its replies will be random.)");
         }
         for (;;) {
-            const sentence = await this.ask("You: ");
-            if (sentence === null) {
+            const text = await this.ask("You: ");
+            if (text === null) {
                 return false;
             }
-            if (sentence.toLowerCase() === GPTConsole.QUIT) {
+            if (text.toLowerCase() === GPTConsole.QUIT) {
                 return true;
             }
-            if (sentence !== "") {
-                this.write(`Model: ${this.reply(sentence)}`);
+            if (text !== "") {
+                if (mode === "alpaca") {
+                    this.warnIfPromptTooLong(text);
+                }
+                this.write(`Model: ${this.reply(text, mode)}`);
             }
         }
     }
     /**
-     * Generates the model's continuation of a sentence. The generator returns
-     * the sentence followed by the generated text; only the generated text is
-     * returned here, since the user has just typed the sentence.
+     * Asks which chat mode to use, repeating the question until the answer is one
+     * of the options. An empty answer or "quit" cancels.
      *
-     * TinyStories marks the end of each story with <|endoftext|>, so a trained
-     * model often generates it when it finishes a story, and then starts a new,
-     * unrelated one. The reply is cut off at that point.
-     *
-     * @param sentence - The text typed by the user.
-     * @returns The model's continuation.
+     * @returns The mode; null if the user cancelled; undefined if the input ended.
      */
-    reply(sentence) {
-        const continuation = this.generator.generate(sentence).slice(sentence.length);
-        const endOfStory = continuation.indexOf(BPETokenizer.END_OF_TEXT);
-        return endOfStory === -1 ? continuation : continuation.slice(0, endOfStory) + " [end of story]";
+    async askChatMode() {
+        this.write("Chat modes:");
+        GPTConsole.CHAT_MODES.forEach(({ label }, index) => this.write(`  ${index + 1}. ${label}`));
+        for (;;) {
+            const answer = await this.ask(`Choose 1 to ${GPTConsole.CHAT_MODES.length} (press Enter or type "${GPTConsole.QUIT}" to cancel): `);
+            if (answer === null) {
+                return undefined;
+            }
+            if (answer === "" || answer.toLowerCase() === GPTConsole.QUIT) {
+                return null;
+            }
+            const option = GPTConsole.CHAT_MODES.find((_, index) => String(index + 1) === answer);
+            if (option !== undefined) {
+                return option.mode;
+            }
+            this.write(`"${answer}" is not an option.`);
+        }
+    }
+    /**
+     * Describes what a chat mode does with the current model's settings.
+     *
+     * @param mode - The chat mode.
+     * @returns A sentence or two for the user.
+     */
+    describeChatMode(mode) {
+        const limit = this.stoppingReplyLength();
+        if (mode === "standard") {
+            return `Standard chat: type the start of a sentence and the model will continue it for ${this.hyperparameters.outputLength} tokens, even past the end of a document.`;
+        }
+        if (mode === "earlyStop") {
+            return `Early stop chat: type the start of a sentence and the model will continue it until it produces its end token, or for at most ${limit} tokens.`;
+        }
+        return `Alpaca chat: type an instruction and the model will respond until it produces its end token, or for at most ${limit} tokens. This needs a model fine tuned on Alpaca.`;
+    }
+    /**
+     * The most tokens a reply can have in the modes that stop at the end token.
+     * Those modes can be given more room than Standard, since a reply that ends
+     * sooner takes less time. At least the model's outputLength is allowed, so
+     * they are never shorter than Standard.
+     *
+     * @returns The number of tokens.
+     */
+    stoppingReplyLength() {
+        return Math.max(this.hyperparameters.outputLength, GPTConsole.STOPPING_REPLY_LENGTH);
+    }
+    /**
+     * Warns if the Alpaca prompt and the longest reply would not fit in the
+     * model's context. The earliest tokens would then be dropped (see Generator),
+     * so the model would see a template with its start missing, which it never
+     * saw in training, since examples too long for a window are left out.
+     *
+     * @param instruction - The instruction typed by the user.
+     */
+    warnIfPromptTooLong(instruction) {
+        const promptLength = this.tokenizer.encode(AlpacaDataset.formatPrompt(instruction)).length;
+        const contextLength = this.hyperparameters.contextLength;
+        if (promptLength + this.stoppingReplyLength() > contextLength) {
+            this.write(`(The prompt is ${promptLength} tokens and the model's context is ${contextLength}, so the start of the template may be lost and the reply may be poor.)`);
+        }
+    }
+    /**
+     * Generates the model's reply to some typed text. The generator returns the
+     * prompt followed by the generated text; only the generated text is returned
+     * here, since the user has just typed the text and has no need of the
+     * template.
+     *
+     * - Standard always generates outputLength tokens and shows them all. Any
+     *   <|endoftext|> token appears as text, followed by whatever the model
+     *   generated next, usually the start of an unrelated document.
+     * - Early stop ends the reply at the <|endoftext|> token, which every dataset
+     *   puts at the end of a document or example.
+     * - Alpaca does the same, and gives the model the instruction in the template
+     *   it was trained on, ending at "### Response:", so that it answers rather
+     *   than continuing the instruction.
+     *
+     * @param text - The text typed by the user.
+     * @param mode - The chat mode.
+     * @returns The model's reply.
+     */
+    reply(text, mode) {
+        if (mode === "standard") {
+            return this.generator.generate(text).slice(text.length);
+        }
+        const prompt = mode === "alpaca" ? AlpacaDataset.formatPrompt(text) : text;
+        const reply = this.generator.generateUntilEnd(prompt, this.stoppingReplyLength()).slice(prompt.length);
+        return reply.trim() === "" ? "(no reply: the model produced its end token straight away)" : reply;
     }
     /**
      * Builds a new, untrained model from the given hyperparameters, with its

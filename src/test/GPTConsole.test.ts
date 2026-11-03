@@ -117,7 +117,7 @@ test("the menu offers Pretrain, Fine tune, Save model, Load model, Load GPT-2 sm
 });
 
 test("chat shows the model's continuation of each sentence, and quit returns to the menu", async (t) => {
-  const written = await runConsole(t, ["8", "Once upon a time", "", "The cat", "quit", "quit"]);
+  const written = await runConsole(t, ["8", "1", "Once upon a time", "", "The cat", "quit", "quit"]);
 
   // Two replies: one per sentence, none for the empty line.
   assert.equal(count(written, /Model: /), 2);
@@ -127,15 +127,65 @@ test("chat shows the model's continuation of each sentence, and quit returns to 
   assert.match(written, /Goodbye\./);
 });
 
-test("the size of model is asked for at startup, repeating until the answer is an option, and a model of that size is created", async (t) => {
-  const written = await runConsoleFromStart(t, ["small", "0", "4", "", "2", "quit"]);
+test("chat offers three modes, repeating the question until the answer is an option", async (t) => {
+  const written = await runConsole(t, ["8", "0", "alpaca", "2", "quit", "quit"]);
 
-  assert.match(written, /Model size:\n\s+1\. Small\n\s+2\. Medium\n\s+3\. Large \(GPT-2 small\)\n/);
+  assert.match(written, /Chat modes:\n\s+1\. Standard\n\s+2\. Early stop\n\s+3\. Alpaca\n/);
+  assert.match(written, /"0" is not an option\./);
+  assert.match(written, /"alpaca" is not an option\./);
+  assert.match(written, /Early stop chat:/);
+});
+
+test("pressing Enter or typing quit at the chat modes returns to the menu without chatting", async (t) => {
+  for (const cancel of ["", "quit"]) {
+    const written = await runConsole(t, ["8", cancel, "quit"]);
+
+    assert.doesNotMatch(written, /You: /);
+    assert.equal(count(written, /8\. Chat/), 2);
+  }
+});
+
+test("the program ends if the input ends while asking for the chat mode", async (t) => {
+  const written = await runConsole(t, ["8"]);
+
+  assert.match(written, /Chat modes:[\s\S]*Goodbye\./);
+});
+
+test("each chat mode says what it does, using the limits of the model", async (t) => {
+  const written = await runConsole(t, ["8", "1", "quit", "8", "2", "quit", "8", "3", "quit", "quit"]);
+
+  // The tiny model's outputLength is 5, so the stopping modes use the larger limit.
+  assert.match(written, /Standard chat: type the start of a sentence and the model will continue it for 5 tokens/);
+  assert.match(written, new RegExp(`Early stop chat: [^\\n]*at most ${GPTConsole.STOPPING_REPLY_LENGTH} tokens`));
+  assert.match(written, new RegExp(`Alpaca chat: type an instruction [^\\n]*at most ${GPTConsole.STOPPING_REPLY_LENGTH} tokens`));
+});
+
+test("the Alpaca chat mode warns about a prompt too long for the model's context, and the other modes do not", async (t) => {
+  // The tiny model's context of 4 tokens is shorter than any Alpaca prompt.
+  const alpaca = await runConsole(t, ["8", "3", "Name a colour.", "quit", "quit"]);
+  const standard = await runConsole(t, ["8", "1", "Name a colour.", "quit", "quit"]);
+  const earlyStop = await runConsole(t, ["8", "2", "Name a colour.", "quit", "quit"]);
+
+  assert.match(alpaca, /\(The prompt is \d+ tokens and the model's context is 4, so the start of the template may be lost/);
+  assert.match(alpaca, /Model: /);
+  assert.doesNotMatch(standard, /start of the template/);
+  assert.doesNotMatch(earlyStop, /start of the template/);
+});
+
+/*
+ * What each chat mode really does is tested with a model trained to remember
+ * one Alpaca example, in ChatModes.test.ts.
+ */
+
+test("the model is asked for at startup, repeating until the answer is an option, and a model of the size chosen is created", async (t) => {
+  const written = await runConsoleFromStart(t, ["small", "0", "5", "", "2", "quit"]);
+
+  assert.match(written, /Model:\n\s+1\. Small\n\s+2\. Medium\n\s+3\. Large \(GPT-2 small\)\n\s+4\. Load model\n/);
   assert.match(written, /"small" is not an option\./);
   assert.match(written, /"0" is not an option\./);
-  assert.match(written, /"4" is not an option\./);
+  assert.match(written, /"5" is not an option\./);
   assert.match(written, /"" is not an option\./);
-  assert.equal(count(written, /Choose 1 to 3/), 5);
+  assert.equal(count(written, /Choose 1 to 4/), 5);
   assert.deepEqual(requestedSizes, ["medium"]);
   assert.match(written, /Created a model with random weights: \d+\.\d million parameters, 16 values wide with 1 transformer blocks\./);
   assert.match(written, /1\. Pretrain/);
@@ -177,7 +227,7 @@ test("typing quit at the startup question, or the input ending there, ends the p
 });
 
 test("pretrain asks for the dataset and the hours, describes the plan and trains the current model", async (t) => {
-  const written = await runConsole(t, ["1", "3", "2.5", "8", "Once upon a time", "quit", "quit"]);
+  const written = await runConsole(t, ["1", "3", "2.5", "8", "1", "Once upon a time", "quit", "quit"]);
 
   // Only the model created at startup is built.
   assert.deepEqual(requestedSizes, ["small"]);
@@ -314,7 +364,7 @@ test("train uses the size of model chosen at startup", async (t) => {
 });
 
 test("quitting with an untrained model does not ask for confirmation", async (t) => {
-  const written = await runConsole(t, ["8", "Hello", "quit", "quit"]);
+  const written = await runConsole(t, ["8", "1", "Hello", "quit", "quit"]);
 
   assert.doesNotMatch(written, /Quit anyway\?/);
   assert.match(written, /Goodbye\./);
@@ -424,7 +474,7 @@ test("load replaces the model with a saved one, showing its progress, and chat u
   const filePath = path.join(modelFolder(), "trained.safetensors");
   // Train and save, then start a new console and load the saved model.
   await runConsole(t, ["1", "3", "1", "3", filePath, "quit"]);
-  const written = await runConsole(t, ["4", filePath, "8", "Once upon a time", "quit", "quit"]);
+  const written = await runConsole(t, ["4", filePath, "8", "1", "Once upon a time", "quit", "quit"]);
 
   assert.match(written, /File to load the model from\?/);
   assert.match(written, /Loading the model from .*trained\.safetensors \(\d+\.\d MB\)/);
@@ -433,6 +483,53 @@ test("load replaces the model with a saved one, showing its progress, and chat u
   assert.match(written, /trained 0 times since it was loaded from trained\.safetensors/);
   assert.doesNotMatch(written, /has not been trained yet/);
   assert.match(written, /Model: /);
+});
+
+test("loading at startup uses the saved model without building another, and it can be chatted with and trained", async (t) => {
+  const filePath = path.join(modelFolder(), "startup.safetensors");
+  await runConsole(t, ["1", "3", "1", "3", filePath, "quit"]);
+
+  const written = await runConsoleFromStart(t, ["4", filePath, "8", "1", "Once upon a time", "quit", "1", "3", "1", "quit", "y"]);
+
+  assert.deepEqual(requestedSizes, []);
+  assert.doesNotMatch(written, /Created a model with random weights/);
+  assert.match(written, /Model loaded in \d+\.\d seconds: \d+\.\d million parameters, a model 8 values wide with 1 transformer blocks\./);
+  assert.match(written, /trained 0 times since it was loaded from startup\.safetensors/);
+  assert.doesNotMatch(written, /has not been trained yet/);
+  assert.match(written, /Model: /);
+  assert.match(written, /trained 1 time since it was loaded from startup\.safetensors/);
+});
+
+test("cancelling a load at startup asks again, and a model can then be created", async (t) => {
+  for (const cancel of ["", "quit"]) {
+    const written = await runConsoleFromStart(t, ["4", cancel, "1", "quit"]);
+
+    assert.match(written, /Load cancelled\./);
+    assert.equal(count(written, /Choose 1 to 4/), 2);
+    assert.deepEqual(requestedSizes, ["small"]);
+    assert.match(written, /1\. Pretrain/);
+  }
+});
+
+test("a load that fails at startup shows the error and asks again, without opening the menu or mentioning a current model", async (t) => {
+  const notAModel = writeTextFile("This is not a saved model.");
+  const written = await runConsoleFromStart(t, ["4", notAModel, "quit"]);
+
+  assert.match(written, /Loading failed: /);
+  assert.doesNotMatch(written, /current model/);
+  assert.equal(count(written, /Choose 1 to 4/), 2);
+  assert.doesNotMatch(written, /1\. Pretrain/);
+  assert.deepEqual(requestedSizes, []);
+  assert.match(written, /Goodbye\./);
+});
+
+test("a file name with nothing there is asked for again at startup, and the program ends if the input ends", async (t) => {
+  const missing = path.join(modelFolder(), "missing.safetensors");
+  const written = await runConsoleFromStart(t, ["4", missing]);
+
+  assert.equal(count(written, /File to load the model from\?/), 2);
+  assert.doesNotMatch(written, /1\. Pretrain/);
+  assert.match(written, /Goodbye\./);
 });
 
 test("load asks again for a file name where there is no file, or a folder", async (t) => {
@@ -541,7 +638,8 @@ test("loading GPT-2 small replaces a smaller model with a large one, says so, sh
   assert.match(written, /Loading GPT-2 small's weights from .*gpt2-small-weights\.safetensors \(548\.1 MB\)/);
   assert.match(written, /Loaded: 10% 20% 30% 40% 50% 60% 70% 80% 90% 100%\n/);
   assert.match(written, /Model loaded in \d+\.\d seconds: 163\.0 million parameters, a model 768 values wide with 12 transformer blocks\./);
-  assert.match(written, new RegExp(`Chat replies will be ${GPTConsole.GPT2_OUTPUT_LENGTH} tokens long and take about a minute each`));
+  assert.match(written, new RegExp(`Standard chat replies will be ${GPTConsole.GPT2_OUTPUT_LENGTH} tokens long and take about a minute each`));
+  assert.match(written, new RegExp(`Early stop and Alpaca replies can run to ${GPTConsole.STOPPING_REPLY_LENGTH} tokens`));
   assert.match(written, /trained 0 times since it was loaded from gpt2-small-weights\.safetensors/);
 });
 
@@ -613,7 +711,7 @@ test("sampling method asks again until the method and setting can be used", asyn
 });
 
 test("chat replies with top-k and top-p sampling", async (t) => {
-  const written = await runConsole(t, ["6", "0.8", "7", "top-k 5", "8", "Once upon a time", "quit", "7", "top-p 0.9", "8", "The cat", "quit", "quit"]);
+  const written = await runConsole(t, ["6", "0.8", "7", "top-k 5", "8", "1", "Once upon a time", "quit", "7", "top-p 0.9", "8", "1", "The cat", "quit", "quit"]);
 
   assert.equal(count(written, /Model: /), 2);
 });
@@ -631,7 +729,7 @@ test("the temperature and sampling method are kept when another model is loaded"
 test("the program ends when the input ends, even while asking for the dataset or the hours, or chatting", async (t) => {
   const whileAskingDataset = await runConsole(t, ["1"]);
   const whileAsking = await runConsole(t, ["1", "3"]);
-  const whileChatting = await runConsole(t, ["8", "Once upon a time"]);
+  const whileChatting = await runConsole(t, ["8", "1", "Once upon a time"]);
 
   assert.match(whileAskingDataset, /Datasets for pre-training:[\s\S]*Goodbye\./);
   assert.match(whileAsking, /How many hours of pre-training\?[\s\S]*Goodbye\./);

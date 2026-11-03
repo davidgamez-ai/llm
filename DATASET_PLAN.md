@@ -455,10 +455,11 @@ These are needed for the full demonstrations, but do not belong to `Trainer`:
 - **Choosing the dataset in the console.** Done since this plan: the console has
   Pretrain and Fine tune options that offer the datasets, and `TrainingPlanner` has
   replaced `GPTConsole.storiesForHours()`.
-- **Stopping at the end token.** `Generator` always produces `outputLength` tokens,
-  so an Alpaca-trained model would run on past its answer.
-- **A prompt mode in chat,** wrapping what the user types in the Alpaca template
-  with `AlpacaDataset.formatPrompt()` and showing only the response.
+- **Stopping at the end token.** Done since this plan: `Generator.generateUntilEnd()`
+  stops generating at `<|endoftext|>`, and chat's Early stop and Alpaca modes use it.
+- **A prompt mode in chat.** Done since this plan: chat's Alpaca mode wraps what the
+  user types in the template with `AlpacaDataset.formatPrompt()` and shows only the
+  response. It takes an instruction only, not a separate input.
 - **Checkpoints during training.** `train()` saves nothing until it returns, which
   is a serious risk on a 50-hour run. AdamW's running averages are also not saved,
   so a resumed run restarts the optimizer.

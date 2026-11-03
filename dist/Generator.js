@@ -2,10 +2,11 @@ import BPETokenizer from "./BPETokenizer.js";
 import Decoder from "./Decoder.js";
 /**
  * Generates text with a GPTModel. The prompt is encoded into token ids once.
- * Then, until outputLength tokens have been generated, the ids are fed into
- * the model, the decoder chooses the next token's id from the logits it
- * returns, and that id is appended to the ids. Finally the generated ids are
- * converted back into text.
+ * Then, until enough tokens have been generated, the ids are fed into the
+ * model, the decoder chooses the next token's id from the logits it returns,
+ * and that id is appended to the ids. Finally the generated ids are converted
+ * back into text. generate() always produces outputLength tokens;
+ * generateUntilEnd() stops early if the model produces the end token.
  *
  * Working with ids throughout, as the book does, avoids converting the text
  * back and forth on every step. That would not be safe: byte pair encoding
@@ -55,6 +56,32 @@ class Generator {
      * @throws Error if the hyperparameters are not in generation mode (thrown by Decoder).
      */
     generate(text) {
+        return this.generateTokens(text, this.hyperparameters.outputLength, false);
+    }
+    /**
+     * Generates tokens following the given text until the model produces the
+     * <|endoftext|> token, which ends generation at once, so that no time is
+     * spent on tokens that would not be wanted. The end token itself is left out
+     * of the result.
+     *
+     * @param text - The prompt to continue.
+     * @param maximumTokens - The most tokens to generate, in case the model does not produce the end token.
+     * @returns The prompt followed by the generated text.
+     * @throws Error if the prompt encodes to no tokens, since the model then has nothing to predict from.
+     * @throws Error if the hyperparameters are not in generation mode (thrown by Decoder).
+     */
+    generateUntilEnd(text, maximumTokens) {
+        return this.generateTokens(text, maximumTokens, true);
+    }
+    /**
+     * Generates tokens following the given text.
+     *
+     * @param text - The prompt to continue.
+     * @param maximumTokens - The most tokens to generate.
+     * @param stopAtEnd - True to stop at the <|endoftext|> token, leaving it out of the result.
+     * @returns The prompt followed by the generated text.
+     */
+    generateTokens(text, maximumTokens, stopAtEnd) {
         // The prompt is encoded once; after that only token ids are used.
         const tokenIds = this.tokenizer.encode(text);
         if (tokenIds.length === 0) {
@@ -62,7 +89,7 @@ class Generator {
         }
         // The ids of the generated tokens, kept separately so they can be decoded at the end.
         const generatedIds = [];
-        for (let t = 0; t < this.hyperparameters.outputLength; ++t) {
+        for (let t = 0; t < maximumTokens; ++t) {
             /*
              * Only the last contextLength tokens are fed to the model, since the
              * position embedding has no rows beyond the context window. Once the
@@ -77,7 +104,11 @@ class Generator {
              * returned logits for every token. The decoder applies the temperature
              * and the softmax itself, since the temperature scales the logits.
              */
-            generatedIds.push(this.decoder.decode(logits[logits.length - 1]));
+            const nextId = this.decoder.decode(logits[logits.length - 1]);
+            if (stopAtEnd && nextId === this.tokenizer.endOfTextId) {
+                break;
+            }
+            generatedIds.push(nextId);
         }
         /*
          * Decode all the generated ids together rather than one at a time. A
